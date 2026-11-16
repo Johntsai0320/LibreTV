@@ -81,11 +81,21 @@ export function sessionFromCookieHeader(cookieHeader: string | null): boolean {
 const attemptMap = new Map<string, { count: number; resetAt: number }>();
 const MAX_ATTEMPTS = 10;
 const WINDOW_MS = 10 * 60 * 1000;
+export const RATE_LIMIT_MAX_ENTRIES = 10_000;
 
 export function checkRateLimit(ip: string): boolean {
   const now = Date.now();
   const entry = attemptMap.get(ip);
   if (!entry || now > entry.resetAt) {
+    if (!entry && attemptMap.size >= RATE_LIMIT_MAX_ENTRIES) {
+      for (const [k, v] of attemptMap) {
+        if (now > v.resetAt) attemptMap.delete(k);
+      }
+      if (attemptMap.size >= RATE_LIMIT_MAX_ENTRIES) {
+        const oldest = attemptMap.keys().next().value;
+        if (oldest !== undefined) attemptMap.delete(oldest);
+      }
+    }
     attemptMap.set(ip, { count: 1, resetAt: now + WINDOW_MS });
     return true;
   }

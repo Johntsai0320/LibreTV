@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { guardRequest } from '@/lib/api-guard';
 import { cmsRequestHeaders, parseDetail, parseDetailPageHtml } from '@/lib/cms-parser';
 import { fetchUpstream, getCache, setCache } from '@/lib/fetch-utils';
+import { readTextWithLimit } from '@/lib/response-limit';
 import { checkUpstreamAllowed } from '@/lib/ssrf';
 import type { SourceConfig, VideoDetail } from '@/lib/types';
 
@@ -9,6 +10,7 @@ export const runtime = 'nodejs';
 
 /** 详情结果短缓存：换源测速/多人观看同一影片时避免重复打上游 */
 const DETAIL_CACHE_TTL = 60 * 1000;
+const MAX_DETAIL_HTML_BYTES = 5 * 1024 * 1024;
 
 function parseSource(raw: string | null): SourceConfig | null {
   if (!raw) return null;
@@ -87,7 +89,7 @@ export async function GET(req: Request) {
         headers: { 'User-Agent': cmsRequestHeaders()['User-Agent'] },
       });
       if (detailRes.ok) {
-        const html = await detailRes.text();
+        const html = await readTextWithLimit(detailRes, MAX_DETAIL_HTML_BYTES, '详情页 HTML');
         resolved = parseDetailPageHtml(html, source);
       }
     }

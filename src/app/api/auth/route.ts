@@ -27,7 +27,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ success: false, error: '请求格式错误' }, { status: 400 });
   }
 
-  if (!checkPassword(password)) {
+  if (password.length > 1024 || !checkPassword(password)) {
     return NextResponse.json({ success: false, error: '密码错误' }, { status: 401 });
   }
 

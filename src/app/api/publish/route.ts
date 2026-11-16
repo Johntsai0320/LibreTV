@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { guardRequest } from '@/lib/api-guard';
+import { PayloadTooLargeError, readTextWithLimit } from '@/lib/response-limit';
 import { MAX_LIVE_SOURCES, MAX_VOD_SOURCES } from '@/lib/source-list';
 import { MAX_PUBLISH_BYTES, publishSourceList } from '@/lib/source-list-publish';
 
@@ -62,8 +63,12 @@ export async function POST(req: Request) {
 
   let raw: unknown;
   try {
-    raw = JSON.parse(await req.text());
-  } catch {
+    const bodyText = await readTextWithLimit(req, MAX_PUBLISH_BYTES * 2, '发布请求体');
+    raw = JSON.parse(bodyText);
+  } catch (err) {
+    if (err instanceof PayloadTooLargeError) {
+      return NextResponse.json({ error: '源列表体积超出公开粘贴板的限制，无法发布' }, { status: 413 });
+    }
     return NextResponse.json({ error: '请求内容不是合法 JSON' }, { status: 400 });
   }
 

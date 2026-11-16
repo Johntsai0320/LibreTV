@@ -1,6 +1,15 @@
 import crypto from 'node:crypto';
 import { afterEach, beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
-import { SESSION_COOKIE, checkPassword, checkRateLimit, clearRateLimit, sessionFromCookieHeader, signSession, verifySession } from './auth';
+import {
+  RATE_LIMIT_MAX_ENTRIES,
+  SESSION_COOKIE,
+  checkPassword,
+  checkRateLimit,
+  clearRateLimit,
+  sessionFromCookieHeader,
+  signSession,
+  verifySession,
+} from './auth';
 
 /**
  * 会话鉴权单测：HMAC 签名/校验、过期、防篡改、密码恒定时间比较、登录限流。
@@ -123,5 +132,21 @@ describe('checkRateLimit', () => {
     expect(checkRateLimit('1.2.3.4')).toBe(false);
     clearRateLimit('1.2.3.4');
     expect(checkRateLimit('1.2.3.4')).toBe(true);
+  });
+
+  it('大量不同 IP 洪泛时淘汰最旧记录，避免内存无限膨胀', () => {
+    for (let i = 0; i < 11; i++) checkRateLimit('flood-oldest');
+    expect(checkRateLimit('flood-oldest')).toBe(false);
+
+    for (let i = 0; i < RATE_LIMIT_MAX_ENTRIES; i++) {
+      checkRateLimit(`flood-${i}`);
+    }
+    // 最旧记录已被淘汰，重新计次
+    expect(checkRateLimit('flood-oldest')).toBe(true);
+
+    clearRateLimit('flood-oldest');
+    for (let i = 0; i < RATE_LIMIT_MAX_ENTRIES; i++) {
+      clearRateLimit(`flood-${i}`);
+    }
   });
 });

@@ -2,10 +2,12 @@ import { NextResponse } from 'next/server';
 import { guardRequest } from '@/lib/api-guard';
 import { checkLiveUrlAllowed, checkUpstreamAllowed, isValidProxyUrl } from '@/lib/ssrf';
 import { fetchUpstream } from '@/lib/fetch-utils';
+import { readTextWithLimit } from '@/lib/response-limit';
 import { describeParseStats, parseSubscriptionJson, parseSubscriptionPayload, withSkipped } from '@/lib/tvbox-parser';
 import type { SourceListPayload } from '@/lib/types';
 
 export const runtime = 'nodejs';
+const MAX_SUBSCRIPTION_BYTES = 10 * 1024 * 1024;
 
 /**
  * 拉取远程数据源订阅，自动识别两种格式：
@@ -36,8 +38,8 @@ export async function GET(req: Request) {
     if (!res.ok) {
       return NextResponse.json({ error: `订阅地址返回 HTTP ${res.status}` }, { status: 502 });
     }
-    // 读文本而非 res.json()：部分配置带注释/尾随逗号，需要宽容解析
-    const text = await res.text();
+    // 读文本而非 res.json()：部分配置带注释/尾随逗号，需要宽容解析，同时限制体积防 OOM
+    const text = await readTextWithLimit(res, MAX_SUBSCRIPTION_BYTES, '订阅内容');
 
     let parsed;
     try {

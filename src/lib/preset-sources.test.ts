@@ -69,6 +69,15 @@ describe('public/sources.json preset source list', () => {
     const taiwanLive = json.liveSources.filter((l) => l.name.includes('台灣'));
     expect(taiwanLive.length).toBeGreaterThanOrEqual(4);
     expect(taiwanLive.every((l) => Boolean(l.epg))).toBe(true);
+
+    const animeVod = json.sources.filter((s) => /動漫|國漫/.test(s.name));
+    expect(animeVod.length).toBeGreaterThanOrEqual(3);
+
+    const animeLive = json.liveSources.filter((l) => /動畫|動漫|少兒|卡通/.test(l.name));
+    expect(animeLive.length).toBeGreaterThanOrEqual(3);
+
+    const sportsLive = json.liveSources.filter((l) => /體育|賽車|運動|NBA|FIFA/.test(l.name));
+    expect(sportsLive.length).toBeGreaterThanOrEqual(5);
   });
 
   it('Dockerfile ENV DEFAULT_SUBSCRIPTIONS parses cleanly with getEnvSubscriptions()', () => {

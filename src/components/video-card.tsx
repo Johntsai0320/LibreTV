@@ -6,6 +6,7 @@ import { useAppStore } from '@/lib/store';
 import { qualityKey } from '@/lib/quality';
 import { compactRemarks, formatRemarks, inferGroupRemarks } from '@/lib/remarks';
 import { cn } from '@/lib/utils';
+import { toSimplified } from '@/lib/zh-conv';
 import { SmartImage } from './smart-image';
 import { QualityBadge } from './quality-badge';
 import { useQualityProbe } from './use-quality-probe';
@@ -43,15 +44,20 @@ function buildGroup(name: string, year: string | undefined, items: SearchResultI
  * - 保持传入顺序（搜索结果已按名称排序）。
  */
 export function aggregateResults(list: SearchResultItem[]): AggregatedGroup[] {
-  const byName = new Map<string, SearchResultItem[]>();
+  const byKey = new Map<string, { displayName: string; items: SearchResultItem[] }>();
   for (const item of list) {
-    const k = (item.name || '').trim();
-    if (!k) continue;
-    if (!byName.has(k)) byName.set(k, []);
-    byName.get(k)!.push(item);
+    const displayName = (item.name || '').trim();
+    if (!displayName) continue;
+    const canonical = toSimplified(displayName);
+    const bucket = byKey.get(canonical);
+    if (bucket) {
+      bucket.items.push(item);
+    } else {
+      byKey.set(canonical, { displayName, items: [item] });
+    }
   }
   const groups: AggregatedGroup[] = [];
-  for (const [name, items] of byName) {
+  for (const { displayName: name, items } of byKey.values()) {
     const years = [...new Set(items.map((i) => i.year).filter(Boolean))] as string[];
     if (years.length > 1) {
       for (const y of years) {

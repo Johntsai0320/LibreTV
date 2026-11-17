@@ -155,6 +155,56 @@
       "isAdult": false
     },
     {
+      "name": "黑木耳資源",
+      "url": "https://json.heimuer.xyz/api.php/provide/vod",
+      "isAdult": false
+    },
+    {
+      "name": "飛速資源",
+      "url": "https://www.feisuzyapi.com/api.php/provide/vod",
+      "isAdult": false
+    },
+    {
+      "name": "快看資源",
+      "url": "https://www.kuaikan-api.com/api.php/provide/vod",
+      "isAdult": false
+    },
+    {
+      "name": "天翼資源",
+      "url": "https://www.911ysw.top/tianyi.php/provide/vod",
+      "isAdult": false
+    },
+    {
+      "name": "飄零資源",
+      "url": "https://p2100.net/api.php/provide/vod",
+      "isAdult": false
+    },
+    {
+      "name": "華為吧資源",
+      "url": "https://hw8.live/api.php/provide/vod",
+      "isAdult": false
+    },
+    {
+      "name": "四九資源",
+      "url": "https://49zyw.com/api.php/provide/vod",
+      "isAdult": false
+    },
+    {
+      "name": "奇虎資源",
+      "url": "https://caiji.qhzyapi.com/api.php/provide/vod",
+      "isAdult": false
+    },
+    {
+      "name": "天空資源",
+      "url": "https://api.tiankongapi.com/api.php/provide/vod",
+      "isAdult": false
+    },
+    {
+      "name": "快車資源",
+      "url": "https://caiji.kczyapi.com/api.php/provide/vod",
+      "isAdult": false
+    },
+    {
       "name": "155資源",
       "url": "https://155api.com/api.php/provide/vod",
       "detail": "https://155api.com",
@@ -252,8 +302,29 @@
   ],
   "liveSources": [
     {
+      "name": "台灣精選直播 (ChiSheng9 含節目表)",
+      "url": "https://raw.githubusercontent.com/ChiSheng9/iptv/master/playlist.m3u",
+      "epg": "https://raw.githubusercontent.com/litiande03/epg/master/pl.xml.gz"
+    },
+    {
+      "name": "台灣四季線上 4GTV (含節目表)",
+      "url": "https://raw.githubusercontent.com/judy-gotv/iptv/main/4gtv.m3u",
+      "epg": "https://raw.githubusercontent.com/litiande03/epg/master/pl.xml.gz"
+    },
+    {
+      "name": "台灣 LiTV 電視頻道 (含節目表)",
+      "url": "https://raw.githubusercontent.com/judy-gotv/iptv/main/litv.m3u",
+      "epg": "https://raw.githubusercontent.com/litiande03/epg/master/pl.xml.gz"
+    },
+    {
+      "name": "台灣 Ofiii 歐飛電視頻道 (含節目表)",
+      "url": "https://raw.githubusercontent.com/judy-gotv/iptv/main/ofiii.m3u",
+      "epg": "https://raw.githubusercontent.com/litiande03/epg/master/pl.xml.gz"
+    },
+    {
       "name": "台灣電視頻道 (iptv-org)",
-      "url": "https://iptv-org.github.io/iptv/countries/tw.m3u"
+      "url": "https://iptv-org.github.io/iptv/countries/tw.m3u",
+      "epg": "https://raw.githubusercontent.com/litiande03/epg/master/pl.xml.gz"
     },
     {
       "name": "香港電視頻道 (iptv-org)",

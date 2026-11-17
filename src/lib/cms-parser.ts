@@ -1,4 +1,6 @@
 import type { SearchResultItem, VideoDetail } from './types';
+import { collectImplicitTerms, parseSearchQuery, type SearchQueryNode } from './search-query';
+import { toSimplified } from './zh-conv';
 
 /**
  * Apple CMS（苹果CMS）资源站响应解析
@@ -159,7 +161,8 @@ const ADULT_KEYWORDS = [
 
 export function isAdultContent(typeName: string | undefined): boolean {
   if (!typeName) return false;
-  return ADULT_KEYWORDS.some((k) => typeName.includes(k));
+  const simplified = toSimplified(typeName);
+  return ADULT_KEYWORDS.some((k) => typeName.includes(k) || simplified.includes(k));
 }
 
 export function filterAdultResults<T extends { typeName?: string }>(items: T[], enabled: boolean): T[] {
@@ -168,11 +171,11 @@ export function filterAdultResults<T extends { typeName?: string }>(items: T[], 
 }
 
 /**
- * 归一化标题/关键词：去空白、标点与符号，转小写。
- * 用于跨标点差异匹配（源站存「摔跤吧!爸爸」而用户搜「摔跤吧！爸爸」）。
+ * 归一化标题/关键词：简繁统一转简体、去空白、标点与符号，转小写。
+ * 用于跨标点与简繁差异匹配（源站存「摔跤吧!爸爸」而用户搜「摔跤吧！爸爸」或繁体「摔跤吧！爸爸」）。
  */
 export function normalizeTitle(s: string): string {
-  return s.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+  return toSimplified(s).toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
 }
 
 /**
@@ -189,8 +192,8 @@ function parseSeasonSuffix(
 ): { base: string; season: number; explicit: boolean } | undefined {
   // 标题侧允许「第二季」后跟任意附注：粤语、预告片、【影视解说】、无分隔符的「第二季粤语」都算
   const explicitPattern = allowAnnotations
-    ? /^(.*?)\s*第\s*([1-9]\d?|[一二两三四五六七八九十]{1,3})\s*季.*$/u
-    : /^(.*?)\s*第\s*([1-9]\d?|[一二两三四五六七八九十]{1,3})\s*季$/u;
+    ? /^(.*?)\s*第\s*([1-9]\d?|[一二两兩三四五六七八九十]{1,3})\s*季.*$/u
+    : /^(.*?)\s*第\s*([1-9]\d?|[一二两兩三四五六七八九十]{1,3})\s*季$/u;
   const explicit = title.trim().match(explicitPattern);
   const bare = title.trim().match(bareNeedsSpace ? /^(.*?)\s+([1-9]\d?)$/u : /^(.*?)\s*([1-9]\d?)$/u);
   const match = explicit ?? bare;
@@ -199,7 +202,7 @@ function parseSeasonSuffix(
   const digits = '零一二三四五六七八九';
   let season = Number(value);
   if (!Number.isFinite(season)) {
-    const chinese = value.replace('两', '二');
+    const chinese = value.replace(/[两兩]/g, '二');
     if (/^[一二三四五六七八九]$/u.test(chinese)) {
       season = digits.indexOf(chinese);
     } else if (/^[一二三四五六七八九]?十[一二三四五六七八九]?$/u.test(chinese)) {
@@ -252,10 +255,11 @@ function matchesPrepared(nName: string, query: PreparedQuery): boolean {
   return query.tokens.length > 1 && query.tokens.every((token) => includesKeyword(nName, token));
 }
 
-function isRelevantPrepared(name: string, query: PreparedQuery): boolean {
-  const nName = normalizeTitle(name);
-  if (!nName) return false;
-  const titleSeason = parseSeasonSuffix(name, true);
+function isRelevantPrepared(
+  nName: string,
+  titleSeason: ReturnType<typeof parseSeasonSuffix>,
+  query: PreparedQuery
+): boolean {
   if (query.season && titleSeason) {
     if (query.season.season !== titleSeason.season) return false;
     if (query.season.explicit || titleSeason.explicit) {
@@ -266,20 +270,77 @@ function isRelevantPrepared(name: string, query: PreparedQuery): boolean {
   return matchesPrepared(nName, query);
 }
 
+type CompiledRelevance = (nName: string, titleSeason: ReturnType<typeof parseSeasonSuffix>) => boolean;
+
+function compileImplicitPhrase(phrase: string): CompiledRelevance | undefined {
+  const query = prepareQuery(phrase);
+  if (!query) return undefined;
+  return (nName, titleSeason) => isRelevantPrepared(nName, titleSeason, query);
+}
+
+function compileAstNode(node: SearchQueryNode): CompiledRelevance | undefined {
+  const implicit = collectImplicitTerms(node);
+  if (implicit) {
+    return compileImplicitPhrase(implicit.join(' '));
+  }
+  switch (node.type) {
+    case 'term': {
+      const normalized = normalizeTitle(node.value);
+      if (!normalized) return undefined;
+      if (node.quoted) {
+        return (nName) => includesKeyword(nName, normalized);
+      }
+      return compileImplicitPhrase(node.value);
+    }
+    case 'not': {
+      const inner = compileAstNode(node.operand);
+      if (!inner) return undefined;
+      return (nName, titleSeason) => !inner(nName, titleSeason);
+    }
+    case 'and': {
+      const left = compileAstNode(node.left);
+      const right = compileAstNode(node.right);
+      if (!left) return right;
+      if (!right) return left;
+      return (nName, titleSeason) => left(nName, titleSeason) && right(nName, titleSeason);
+    }
+    case 'or': {
+      const left = compileAstNode(node.left);
+      const right = compileAstNode(node.right);
+      if (!left) return right;
+      if (!right) return left;
+      return (nName, titleSeason) => left(nName, titleSeason) || right(nName, titleSeason);
+    }
+  }
+}
+
+function compileRelevanceQuery(wd: string): CompiledRelevance | undefined {
+  const { ast } = parseSearchQuery(wd);
+  if (!ast) return undefined;
+  return compileAstNode(ast);
+}
+
+function isRelevantCompiled(name: string, compiled: CompiledRelevance): boolean {
+  const nName = normalizeTitle(name);
+  if (!nName) return false;
+  const titleSeason = parseSeasonSuffix(name, true);
+  return compiled(nName, titleSeason);
+}
+
 /**
- * 忽略标点和大小写，多词查询要求每个词都命中。
+ * 忽略标点、大小写与简繁差异，支持布尔逻辑（&、|、空白 AND、- / ! / NOT、()、""）；
  * 独立的末尾数字也可匹配明确的中文季数后缀；
  * 标题内部的数字与四位年份不作为季数别名。
  */
 export function isRelevant(name: string, wd: string): boolean {
-  const query = prepareQuery(wd);
-  if (!query) return true;
-  return isRelevantPrepared(name, query);
+  const compiled = compileRelevanceQuery(wd);
+  if (!compiled) return true;
+  return isRelevantCompiled(name, compiled);
 }
 
 /** 丢弃无关结果；即使全部不相关，也不能返回源站的原始目录。 */
 export function filterRelevantResults<T extends { name?: string }>(items: T[], wd: string): T[] {
-  const query = prepareQuery(wd);
-  if (!query) return items;
-  return items.filter((item) => isRelevantPrepared(item.name || '', query));
+  const compiled = compileRelevanceQuery(wd);
+  if (!compiled) return items;
+  return items.filter((item) => isRelevantCompiled(item.name || '', compiled));
 }

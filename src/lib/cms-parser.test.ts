@@ -249,4 +249,25 @@ describe('filterRelevantResults', () => {
       { name: '10月17日 足球联赛' }, {}, { name: '' }, relevant,
     ], '赛博朋克：边缘行者 2')).toEqual([relevant]);
   });
+
+  it('简繁自动互通与布林逻辑过滤', () => {
+    expect(isAdultContent('無碼高清')).toBe(true);
+    expect(isAdultContent('國產傳媒')).toBe(true);
+    expect(normalizeTitle('周處除三害！')).toBe(normalizeTitle('周处除三害'));
+    expect(normalizeTitle('臺灣故事')).toBe(normalizeTitle('台湾故事'));
+
+    expect(isRelevant('周处除三害', '周處除三害')).toBe(true);
+    expect(isRelevant('臺灣新聞故事', '台湾新闻')).toBe(true);
+    expect(isRelevant('庆余年第二季', '慶餘年 第兩季')).toBe(true);
+    expect(isRelevant('慶餘年 第兩季', '庆余年 2')).toBe(true);
+
+    // 布尔运算 + 简繁 + 季数保留
+    expect(isRelevant('庆余年第二季', '(慶餘年 2) -解說')).toBe(true);
+    expect(isRelevant('庆余年第二季【影视解说】', '(慶餘年 2) -解說')).toBe(false);
+    expect(isRelevant('三体', '繁花 | 三體')).toBe(true);
+    expect(isRelevant('钢铁侠 2008 HD', '鋼鐵俠 & 2008 !預告')).toBe(true);
+    expect(isRelevant('钢铁侠 2008 预告片', '鋼鐵俠 & 2008 !預告')).toBe(false);
+    expect(isRelevant('Star Wars', '"Star Wars"')).toBe(true);
+    expect(isRelevant('Wars of Star', '"Star Wars"')).toBe(false);
+  });
 });

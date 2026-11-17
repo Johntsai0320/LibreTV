@@ -18,6 +18,7 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=8080
 ENV HOSTNAME=0.0.0.0
+ENV DEFAULT_SUBSCRIPTIONS="[{\"url\":\"https://raw.githubusercontent.com/Johntsai0320/LibreTV/main/public/sources.json\",\"name\":\"LibreTV精選片源\",\"refreshDays\":7}]"
 
 # 非 root 用户
 RUN addgroup -S nodejs && adduser -S nextjs -G nodejs

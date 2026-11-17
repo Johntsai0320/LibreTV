@@ -119,11 +119,17 @@ export async function fetchWithSafeRedirects(
       else init.signal.addEventListener('abort', () => controller.abort(init.signal?.reason), { once: true });
     }
     for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+      if (controller.signal.aborted) {
+        throw controller.signal.reason ?? new DOMException('Aborted', 'AbortError');
+      }
       const verdict = allowPrivate
         ? await checkLiveUrlAllowed(current)
         : await checkUpstreamAllowed(current);
       if (!verdict.ok) {
         throw new Error(`跳转目标被拒绝: ${verdict.reason}`);
+      }
+      if (controller.signal.aborted) {
+        throw controller.signal.reason ?? new DOMException('Aborted', 'AbortError');
       }
       const timer = headerTimeoutMs ? setTimeout(() => controller.abort(), headerTimeoutMs) : null;
       let res: Response;

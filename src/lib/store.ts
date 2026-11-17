@@ -294,6 +294,8 @@ interface AppState extends AppSettings {
   recordSourceHealth: (outcomes: SourceSearchOutcome[]) => SourceDisableEvent[];
   /** 清除单个源的健康度记录（手动恢复入口） */
   clearSourceHealth: (key: string) => void;
+  /** 批量清除多个源的健康度记录（避免逐条 set 反复序列化） */
+  clearSourceHealthMany: (keys: string[]) => void;
   /**
    * 写入画质记录（播放实测与懒探测共用同一份缓存）。
    * 实测值优先级高于探测值：解析 m3u8 得到的只是源站声明的档位，
@@ -758,6 +760,18 @@ export const useAppStore = create<AppState>()(
 
       recordSourceHealth: (outcomes) => {
         if (outcomes.length === 0) return [];
+        // 防雪崩保护：当同一批搜索多个源（≥5 个）全部失败（0 个成功），
+        // 或大批量（≥10 个）中 ≥85% 均因超时失败时，极大概率是本机网络/代理/DNS 异常，
+        // 不应把所有源一起累计 failStreak 甚至全部停用锁死。
+        if (outcomes.length >= 5 && outcomes.every((o) => !o.ok)) {
+          return [];
+        }
+        if (
+          outcomes.length >= 10 &&
+          outcomes.filter((o) => o.timedOut).length >= Math.ceil(outcomes.length * 0.85)
+        ) {
+          return [];
+        }
         const now = Date.now();
         const health: Record<string, SourceHealthEntry> = {};
         // 顺带清理陈旧条目：超过 7 天没再参与过搜索的源，其惩罚等级一并作废
@@ -815,6 +829,19 @@ export const useAppStore = create<AppState>()(
         const next = { ...get().sourceHealth };
         delete next[key];
         set({ sourceHealth: next });
+      },
+
+      clearSourceHealthMany: (keys) => {
+        if (keys.length === 0) return;
+        const next = { ...get().sourceHealth };
+        let changed = false;
+        for (const key of keys) {
+          if (key in next) {
+            delete next[key];
+            changed = true;
+          }
+        }
+        if (changed) set({ sourceHealth: next });
       },
 
       markEnvSubsSeen: (urls) => {

@@ -286,7 +286,7 @@ function VodSourcesPanel() {
   const restoreAll = () => {
     const keys = filtered.filter((s) => isSourceDisabled(store, s.key)).map((s) => s.key);
     if (keys.length === 0) return;
-    keys.forEach((k) => useAppStore.getState().clearSourceHealth(k));
+    useAppStore.getState().clearSourceHealthMany(keys);
     toast(`已恢复 ${keys.length} 个源`, 'success');
   };
 

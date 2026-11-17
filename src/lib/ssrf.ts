@@ -147,30 +147,45 @@ export function createSSRFAgent(options: { allowPrivate?: boolean } = {}): Agent
       return cb(blockErr, '');
     }
 
-    callbackLookup(cleanHost, { all: true }, (err, addresses) => {
-      if (err) return cb(err, '');
-      const list = Array.isArray(addresses) ? addresses : [];
-      if (list.length === 0) {
-        return cb(new Error(`未找到主机地址: ${hostname}`), '');
-      }
-      if (!allowPrivate) {
-        for (const item of list) {
-          if (isPrivateIP(item.address)) {
-            const blockErr = Object.assign(new Error(`目标地址解析到私有/保留网络 (${item.address})`), {
-              code: 'ERR_SSRF_BLOCKED',
-            });
-            return cb(blockErr, '');
+    const reqOpts =
+      opts && typeof opts === 'object'
+        ? (opts as { all?: boolean; hints?: number; family?: number })
+        : {};
+
+    callbackLookup(
+      cleanHost,
+      {
+        all: true,
+        ...(typeof reqOpts.hints === 'number' ? { hints: reqOpts.hints } : {}),
+      },
+      (err, addresses) => {
+        if (err) return cb(err, '');
+        const list = Array.isArray(addresses) ? addresses : [];
+        if (list.length === 0) {
+          return cb(new Error(`未找到主机地址: ${hostname}`), '');
+        }
+        if (!allowPrivate) {
+          for (const item of list) {
+            if (isPrivateIP(item.address)) {
+              const blockErr = Object.assign(new Error(`目标地址解析到私有/保留网络 (${item.address})`), {
+                code: 'ERR_SSRF_BLOCKED',
+              });
+              return cb(blockErr, '');
+            }
           }
         }
-      }
 
-      const wantAll = opts && typeof opts === 'object' && (opts as { all?: boolean }).all;
-      if (wantAll) {
-        cb(null, list);
-      } else {
-        cb(null, list[0].address, list[0].family);
+        if (reqOpts.all) {
+          cb(null, list);
+        } else {
+          const picked =
+            (reqOpts.family === 4 || reqOpts.family === 6
+              ? list.find((item) => item.family === reqOpts.family)
+              : undefined) ?? list[0];
+          cb(null, picked.address, picked.family);
+        }
       }
-    });
+    );
   }
 
   const baseConnector = buildConnector({

@@ -16,6 +16,7 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV UV_THREADPOOL_SIZE=16
 ENV PORT=8080
 ENV HOSTNAME=0.0.0.0
 ENV DEFAULT_SUBSCRIPTIONS="[{\"url\":\"https://raw.githubusercontent.com/Johntsai0320/LibreTV/main/public/sources.json\",\"name\":\"LibreTV精選片源\",\"refreshDays\":7}]"

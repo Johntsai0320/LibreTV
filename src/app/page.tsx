@@ -94,17 +94,45 @@ function HomeContent() {
     [selectedKeys, sourceHealth, subscriptions]
   );
 
+  const restoreDisabledSources = (silent = false) => {
+    if (disabledSources.length === 0) return 0;
+    const count = disabledSources.length;
+    useAppStore.getState().clearSourceHealthMany(disabledSources);
+    if (!silent) toast(`已恢复 ${count} 个暂停的点播源`, 'success');
+    return count;
+  };
+
   const searchQuery = useQuery({
     queryKey: ['search', urlQuery, selectedKeys, yellowFilter],
     // 与 runSearch 的截断规则保持一致：顶栏搜索 / 手动构造长链接不会绕过上限
-    queryFn: ({ signal }) => {
+    queryFn: async ({ signal }) => {
       setStreamedOutcomes([]);
-      return api.search(urlQuery.slice(0, 100), selectedSources, yellowFilter, {
+      const settledOutcomes: SourceSearchOutcome[] = [];
+      const res = await api.search(urlQuery.slice(0, 100), selectedSources, yellowFilter, {
         signal,
-        // 逐源结算即更新：结果边搜边渲染，同时滚动健康度
+        // 逐源结算即更新：结果边搜边渲染；健康度统一在整批结束后批量写入，
+        // 以便防雪崩保护识别「整批全超时/全失败」场景并避免流式期间反复写盘
         onSource: (outcome) => {
+          settledOutcomes.push(outcome);
           setStreamedOutcomes((prev) => [...prev, outcome]);
-          for (const ev of useAppStore.getState().recordSourceHealth([outcome])) {
+        },
+      });
+      if (!signal.aborted) {
+        const failMap = new Map(res.failures.map((f) => [f.sourceKey, f]));
+        const batchOutcomes: SourceSearchOutcome[] =
+          settledOutcomes.length > 0
+            ? settledOutcomes
+            : selectedSources.map((s) => {
+                const f = failMap.get(s.key);
+                return f
+                  ? { sourceKey: s.key, ok: false, error: f.error, timedOut: f.timedOut, list: [] }
+                  : { sourceKey: s.key, ok: true, list: [] };
+              });
+        const events = useAppStore.getState().recordSourceHealth(batchOutcomes);
+        if (events.length > 3) {
+          toast(`${events.length} 个点播源因连续超时/失败已暂停参与搜索`, 'warning');
+        } else {
+          for (const ev of events) {
             toast(
               ev.permanent
                 ? `「${sourceName(ev.key)}」多次失败，已停止参与搜索，可在设置中恢复`
@@ -112,8 +140,9 @@ function HomeContent() {
               'warning'
             );
           }
-        },
-      });
+        }
+      }
+      return res;
     },
     enabled: Boolean(urlQuery) && selectedSources.length > 0,
     // 5 分钟内从播放页返回时直接使用缓存，不重新搜索（服务端另有 60s 结果缓存兜底）
@@ -131,6 +160,19 @@ function HomeContent() {
       return;
     }
     if (selectedSources.length === 0) {
+      if (disabledSources.length > 0) {
+        toast(`已勾选的 ${disabledSources.length} 个点播源均因连续失败已暂停`, 'warning', {
+          action: {
+            label: '全部恢复并搜索',
+            onClick: () => {
+              restoreDisabledSources(true);
+              router.push(`/?s=${encodeURIComponent(query)}`, { scroll: false });
+              searchHistory.record(query);
+            },
+          },
+        });
+        return;
+      }
       toast('请先在设置中添加并勾选点播源', 'warning');
       return;
     }
@@ -318,9 +360,21 @@ function HomeContent() {
             )}
 
             {disabledSources.length > 0 && (
-              <div className="mb-3 text-xs text-faint bg-chip rounded-lg px-3 py-2">
-                {disabledSources.length} 个源因连续超时/失败已暂停参与搜索（临时停用的到期自动恢复，
-                长期停用的需在设置中手动恢复）：{disabledSources.map((key) => sourceName(key)).join('、')}
+              <div className="mb-3 text-xs text-faint bg-chip rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+                <span className="min-w-0">
+                  {disabledSources.length} 个源因连续超时/失败已暂停参与搜索（临时停用的到期自动恢复，
+                  长期停用的需手动恢复）：{disabledSources.map((key) => sourceName(key)).join('、')}
+                </span>
+                <button
+                  type="button"
+                  className="btn-ghost btn-sm shrink-0 !text-accent"
+                  onClick={() => {
+                    restoreDisabledSources();
+                    setTimeout(() => void searchQuery.refetch(), 0);
+                  }}
+                >
+                  全部恢复
+                </button>
               </div>
             )}
 
@@ -332,7 +386,17 @@ function HomeContent() {
             )}
 
             {selectedSources.length === 0 ? (
-              <NoSourceGuide hasSources={customAPIs.length > 0 || envSources.length > 0} />
+              disabledSources.length > 0 ? (
+                <PausedSourcesGuide
+                  count={disabledSources.length}
+                  onRestore={() => {
+                    restoreDisabledSources();
+                    setTimeout(() => void searchQuery.refetch(), 0);
+                  }}
+                />
+              ) : (
+                <NoSourceGuide hasSources={customAPIs.length > 0 || envSources.length > 0} />
+              )
             ) : list.length > 0 ? (
               <>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 items-start">
@@ -402,6 +466,21 @@ function ResultsSkeleton() {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+/** 已勾选的点播源全部被健康机制暂停时的专属恢复引导 */
+function PausedSourcesGuide({ count, onRestore }: { count: number; onRestore: () => void }) {
+  return (
+    <div className="border border-dashed border-line rounded-xl p-10 text-center max-w-lg mx-auto">
+      <h3 className="text-content font-medium mb-2">已勾选的 {count} 个点播源均已暂停</h3>
+      <p className="text-sm text-muted leading-relaxed mb-4">
+        这些源因先前连续超时或失败被自动暂停参与搜索，并非未勾选。若网络已恢复，可点击下方按钮立即恢复并重新搜索。
+      </p>
+      <button type="button" className="btn-primary btn-sm" onClick={onRestore}>
+        恢复全部暂停源并重搜
+      </button>
     </div>
   );
 }

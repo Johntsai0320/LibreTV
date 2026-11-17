@@ -5,17 +5,19 @@ import { useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { ThemeToggle } from './theme';
 import { SourceManagerDrawer } from './source-manager';
+import { FavoritesPanel } from './favorites-panel';
 import { HistoryPanel } from './history-panel';
 import { requestShowDownloadManager } from './download-manager';
 import { Icon, type IconName } from './icon';
 import { SearchHistoryDropdown, useSearchHistory } from './search-history';
 import { cn } from '@/lib/utils';
 
-/** 顶部导航：Logo、搜索框（首页外）、历史、设置 */
+/** 顶部导航：Logo、搜索框（首页外）、收藏、历史、设置 */
 export function Header({ showSearch = false }: { showSearch?: boolean }) {
   const router = useRouter();
   const pathname = usePathname();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [favoritesOpen, setFavoritesOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   /** 移动端（<sm）折叠菜单：窄屏放不下 5 个导航项 + 3 个图标按钮 */
   const [menuOpen, setMenuOpen] = useState(false);
@@ -111,6 +113,9 @@ export function Header({ showSearch = false }: { showSearch?: boolean }) {
               关于
             </HeaderLink>
             <ThemeToggle />
+            <IconButton label="我的收藏" onClick={() => setFavoritesOpen(true)}>
+              <Icon name="star" />
+            </IconButton>
             <IconButton label="观看历史" onClick={() => setHistoryOpen(true)}>
               <Icon name="clock" />
             </IconButton>
@@ -159,6 +164,15 @@ export function Header({ showSearch = false }: { showSearch?: boolean }) {
                 关于
               </MenuRow>
               <MenuAction
+                icon="star"
+                onClick={() => {
+                  closeMenu();
+                  setFavoritesOpen(true);
+                }}
+              >
+                我的收藏
+              </MenuAction>
+              <MenuAction
                 icon="clock"
                 onClick={() => {
                   closeMenu();
@@ -186,6 +200,7 @@ export function Header({ showSearch = false }: { showSearch?: boolean }) {
       </header>
 
       <SourceManagerDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <FavoritesPanel open={favoritesOpen} onClose={() => setFavoritesOpen(false)} />
       <HistoryPanel open={historyOpen} onClose={() => setHistoryOpen(false)} />
     </>
   );

@@ -1,6 +1,7 @@
 'use client';
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
 import dynamic from 'next/dynamic';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -34,12 +35,15 @@ import { resolveSource, useAppStore } from '@/lib/store';
 import { qualityKey } from '@/lib/quality';
 import {
   clearProgress,
+  favoriteIdOf,
   progressKeyOf,
   saveProgress,
+  toggleFavorite,
   updateHistoryProgress,
   upsertHistory,
   db,
 } from '@/lib/db';
+import { formatRemarks } from '@/lib/remarks';
 import { cn, formatTime } from '@/lib/utils';
 
 /**
@@ -144,6 +148,31 @@ function WatchContent() {
   );
   const skipMark = store.skipMarks[markKey];
   const markedCount = skipMark?.segments.length ?? 0;
+
+  const favVodId = vodId || currentUrl;
+  const favEntry = useLiveQuery(
+    () => (sourceKey && favVodId ? db.favorites.get(favoriteIdOf(sourceKey, favVodId)) : undefined),
+    [sourceKey, favVodId]
+  );
+  const isFavorited = Boolean(favEntry);
+
+  const handleToggleFavorite = useCallback(async () => {
+    if (!sourceKey || !favVodId) return;
+    const info = detailQuery.data?.videoInfo;
+    const added = await toggleFavorite({
+      sourceKey,
+      sourceName: source?.name,
+      sourceUrl: source?.url,
+      detail: source?.detail,
+      vodId: favVodId,
+      title: videoTitle,
+      pic: info?.cover,
+      typeName: info?.typeName,
+      year: info?.year,
+      remarks: formatRemarks(info?.remarks) || undefined,
+    });
+    toast(added ? `已收藏「${videoTitle}」` : `已取消收藏「${videoTitle}」`, added ? 'success' : 'info');
+  }, [sourceKey, favVodId, detailQuery.data, source, videoTitle, toast]);
 
   // 中段两步态的起点：页面层持有，面板按钮与 Shift+S/E 共用同一份状态
   const [pendingStart, setPendingStart] = useState<number | null>(null);
@@ -406,6 +435,15 @@ function WatchContent() {
                 {markedCount > 0 && skipMark?.enabled === false && (
                   <span className="ml-1 inline-block size-1.5 rounded-full bg-faint" aria-label="本剧跳过已关闭" />
                 )}
+              </button>
+              <button
+                className={cn('btn-ghost btn-sm', isFavorited && 'text-warning')}
+                onClick={() => void handleToggleFavorite()}
+                aria-label={isFavorited ? '取消收藏' : '收藏'}
+                title={isFavorited ? '取消收藏' : '加入收藏'}
+              >
+                <Icon name="star" filled={isFavorited} className="w-3.5 h-3.5" />
+                <span>{isFavorited ? '已收藏' : '收藏'}</span>
               </button>
               <label className="flex items-center gap-1.5 text-xs text-muted ml-auto cursor-pointer">
                 <input

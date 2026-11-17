@@ -20,7 +20,7 @@ import {
 import { loadCacheSettings, saveCacheSettings, getCacheSummary, clearVideoCache, type CacheSummary } from '@/lib/video-cache';
 import { EmptyState, Spinner } from './states';
 import { useSourceProbe } from './use-source-probe';
-import { allLiveSources, isSourceDisabled, keyBelongsToSubscription, resolveSource, subKeyPrefix, useAppStore } from '@/lib/store';
+import { allLiveSources, isSourceDisabled, keyBelongsToSubscription, normalizeSourceUrl, resolveSource, subKeyPrefix, useAppStore } from '@/lib/store';
 import type { SourceConfig } from '@/lib/types';
 import { useToast } from './toast';
 import { formatRelativeTime, hostnameOf, validateSourceUrl, cn } from '@/lib/utils';
@@ -209,11 +209,12 @@ function TabRow<T extends string>({
 
 // —— 点播源面板 ——
 
-type VodFilter = 'all' | 'enabled' | 'disabled' | 'sub' | 'manual';
+type VodFilter = 'all' | 'fav' | 'enabled' | 'disabled' | 'sub' | 'manual';
 
-// 与直播源面板保持同一组筛选项与顺序：先状态（已启用 / 已停用），后来源（来自订阅 / 手动添加）
+// 与直播源面板保持同一组筛选项与顺序：全部 / 已收藏 / 状态（已启用 / 已停用） / 来源（来自订阅 / 手动添加）
 const VOD_FILTERS: { id: VodFilter; label: string }[] = [
   { id: 'all', label: '全部' },
+  { id: 'fav', label: '已收藏' },
   { id: 'enabled', label: '已启用' },
   { id: 'disabled', label: '已停用' },
   { id: 'sub', label: '来自订阅' },
@@ -231,21 +232,30 @@ function VodSourcesPanel() {
 
   const envKeys = useMemo(() => new Set(store.envSources.map((s) => s.key)), [store.envSources]);
   const all = useMemo(() => [...store.envSources, ...store.customAPIs], [store.envSources, store.customAPIs]);
+  const favUrlSet = useMemo(
+    () => new Set(store.vodFavoriteUrls.map(normalizeSourceUrl)),
+    [store.vodFavoriteUrls]
+  );
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return all.filter((s) => {
-      const fromSub = s.key.startsWith('sub_');
-      // 已启用 = 勾选中且当前未被自动停用（即真正在参与搜索的源）
-      if (filter === 'enabled' && !(store.selectedKeys.includes(s.key) && !isSourceDisabled(store, s.key))) return false;
-      if (filter === 'disabled' && !isSourceDisabled(store, s.key)) return false;
-      if (filter === 'sub' && !fromSub) return false;
-      // 手动添加 = 既非订阅导入、也非部署者预置
-      if (filter === 'manual' && (fromSub || envKeys.has(s.key))) return false;
-      if (!q) return true;
-      return s.name.toLowerCase().includes(q) || s.url.toLowerCase().includes(q);
-    });
-  }, [all, query, filter, store, envKeys]);
+    return all
+      .filter((s) => {
+        const fromSub = s.key.startsWith('sub_');
+        if (filter === 'fav' && !favUrlSet.has(normalizeSourceUrl(s.url))) return false;
+        // 已启用 = 勾选中且当前未被自动停用（即真正在参与搜索的源）
+        if (filter === 'enabled' && !(store.selectedKeys.includes(s.key) && !isSourceDisabled(store, s.key))) return false;
+        if (filter === 'disabled' && !isSourceDisabled(store, s.key)) return false;
+        if (filter === 'sub' && !fromSub) return false;
+        // 手动添加 = 既非订阅导入、也非部署者预置
+        if (filter === 'manual' && (fromSub || envKeys.has(s.key))) return false;
+        if (!q) return true;
+        return s.name.toLowerCase().includes(q) || s.url.toLowerCase().includes(q);
+      })
+      .map((s, index) => ({ s, index, fav: favUrlSet.has(normalizeSourceUrl(s.url)) ? 1 : 0 }))
+      .sort((a, b) => b.fav - a.fav || a.index - b.index)
+      .map((entry) => entry.s);
+  }, [all, query, filter, store, envKeys, favUrlSet]);
 
   const visibleKeys = filtered.map((s) => s.key);
   const allSelected = visibleKeys.length > 0 && visibleKeys.every((k) => store.selectedKeys.includes(k));
@@ -438,6 +448,9 @@ function VodSourceRow({
 }) {
   const selected = useAppStore((s) => s.selectedKeys.includes(api.key));
   const yellowFilter = useAppStore((s) => s.yellowFilter);
+  const isFavorite = useAppStore((s) =>
+    s.vodFavoriteUrls.some((u) => normalizeSourceUrl(u) === normalizeSourceUrl(api.url))
+  );
   const toast = useToast().toast;
   const fromSubscription = api.key.startsWith('sub_');
   const adultBlocked = !!api.isAdult && yellowFilter;
@@ -503,6 +516,19 @@ function VodSourceRow({
           </div>
           <div className="text-xs text-faint truncate">{api.url}</div>
         </div>
+        <button
+          type="button"
+          className={cn(
+            'rounded-md p-1.5 transition-colors hover:bg-hover shrink-0',
+            isFavorite ? 'text-warning' : 'text-muted hover:text-warning'
+          )}
+          onClick={() => useAppStore.getState().toggleVodSourceFavorite(api.url)}
+          aria-label={isFavorite ? `取消收藏 ${api.name}` : `收藏 ${api.name}`}
+          aria-pressed={isFavorite}
+          title={isFavorite ? '取消常用收藏' : '设为常用（置顶显示）'}
+        >
+          <Icon name="star" filled={isFavorite} className="w-4 h-4" />
+        </button>
         <HealthBadge sourceKey={api.key} />
         <TestBadge
           state={testState}

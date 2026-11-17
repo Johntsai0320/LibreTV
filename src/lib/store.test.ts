@@ -8,7 +8,7 @@ vi.mock('./db', () => ({
   saveLiveProbeResults: vi.fn(async () => {}),
 }));
 
-import { isInDisabledSubscription, isSourceDisabled, keyBelongsToSubscription, SOURCE_DISABLE_LADDER, subKeyPrefix, useAppStore } from './store';
+import { isInDisabledSubscription, isSourceDisabled, keyBelongsToSubscription, normalizeSourceUrl, SOURCE_DISABLE_LADDER, subKeyPrefix, useAppStore } from './store';
 import type { SourceConfig } from './types';
 
 const store = () => useAppStore.getState();
@@ -23,6 +23,8 @@ beforeEach(() => {
     liveSubscriptions: [],
     liveSelectedUrls: [],
     liveFavorites: [],
+    vodFavoriteUrls: [],
+    liveSourceFavorites: [],
     liveRecent: [],
     yellowFilter: false,
     skipMarks: {},
@@ -555,5 +557,46 @@ describe('底部细进度条设置项', () => {
     store().updateSettings({ miniProgressBar: false });
     expect(options.partialize(store()).miniProgressBar).toBe(false);
     store().updateSettings({ miniProgressBar: true });
+  });
+});
+
+describe('片源星标收藏（点播与直播）', () => {
+  it('normalizeSourceUrl 会去除首尾空格和末尾斜杠', () => {
+    expect(normalizeSourceUrl('  https://example.com/api.php/provide/vod///  ')).toBe(
+      'https://example.com/api.php/provide/vod'
+    );
+    expect(normalizeSourceUrl('')).toBe('');
+  });
+
+  it('toggleVodSourceFavorite 支持按归一化 URL 切换收藏状态', () => {
+    store().toggleVodSourceFavorite('https://a.example.com/vod/');
+    expect(store().vodFavoriteUrls).toEqual(['https://a.example.com/vod']);
+
+    // 传入末尾带斜杠或空白的同地址能正确识别并取消收藏
+    store().toggleVodSourceFavorite('  https://a.example.com/vod  ');
+    expect(store().vodFavoriteUrls).toEqual([]);
+
+    // 空字符串忽略
+    store().toggleVodSourceFavorite('   ');
+    expect(store().vodFavoriteUrls).toEqual([]);
+  });
+
+  it('toggleLiveSourceFavorite 支持按归一化 URL 切换直播源收藏状态', () => {
+    store().toggleLiveSourceFavorite('https://live.example.com/list.m3u/');
+    expect(store().liveSourceFavorites).toEqual(['https://live.example.com/list.m3u']);
+
+    store().toggleLiveSourceFavorite('https://live.example.com/list.m3u');
+    expect(store().liveSourceFavorites).toEqual([]);
+  });
+
+  it('partialize 会保留 vodFavoriteUrls 与 liveSourceFavorites', () => {
+    const options = useAppStore.persist.getOptions() as unknown as {
+      partialize: (s: unknown) => Record<string, unknown>;
+    };
+    store().toggleVodSourceFavorite('https://a.example.com/vod');
+    store().toggleLiveSourceFavorite('https://live.example.com/list.m3u');
+    const persisted = options.partialize(store());
+    expect(persisted.vodFavoriteUrls).toEqual(['https://a.example.com/vod']);
+    expect(persisted.liveSourceFavorites).toEqual(['https://live.example.com/list.m3u']);
   });
 });

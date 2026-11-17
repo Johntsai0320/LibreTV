@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { SearchResultItem, SourceConfig } from '@/lib/types';
 import { useAppStore } from '@/lib/store';
+import { favoriteIdOf, toggleFavorite } from '@/lib/db';
 import { qualityKey } from '@/lib/quality';
 import { compactRemarks, formatRemarks, inferGroupRemarks } from '@/lib/remarks';
 import { cn } from '@/lib/utils';
@@ -11,6 +12,8 @@ import { SmartImage } from './smart-image';
 import { QualityBadge } from './quality-badge';
 import { useQualityProbe } from './use-quality-probe';
 import { useInView } from './use-in-view';
+import { Icon } from './icon';
+import { useToast } from './toast';
 
 // —— 跨源同名聚合 ——
 
@@ -81,14 +84,17 @@ export function AggregatedCard({
   group,
   onOpen,
   sources,
+  favoriteIds,
 }: {
   group: AggregatedGroup;
   onOpen: (item: SearchResultItem) => void;
   /** 完整源配置：探测画质需要 source.url / source.detail，搜索结果里只带 sourceUrl */
   sources?: SourceConfig[];
+  favoriteIds?: Set<string>;
 }) {
   const imageProxyMode = useAppStore((s) => s.imageProxyMode);
   const customImageProxy = useAppStore((s) => s.customImageProxy);
+  const { toast } = useToast();
   const [imgFailed, setImgFailed] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const showImg = !!group.pic && !imgFailed;
@@ -97,6 +103,23 @@ export function AggregatedCard({
   const adult = useMemo(() => group.items.some((i) => i.isAdult), [group.items]);
 
   const { qualities, probing, progress, prime, probe, probeQueued, retry } = useQualityProbe(sources);
+
+  const handleToggleItemFavorite = async (item: SearchResultItem) => {
+    const matchedSource = sources?.find((s) => s.key === item.sourceKey);
+    const added = await toggleFavorite({
+      sourceKey: item.sourceKey,
+      sourceName: item.sourceName || matchedSource?.name,
+      sourceUrl: item.sourceUrl || matchedSource?.url,
+      detail: matchedSource?.detail,
+      vodId: item.vodId,
+      title: item.name,
+      pic: item.pic,
+      typeName: item.typeName,
+      year: item.year,
+      remarks: formatRemarks(item.remarks) || undefined,
+    });
+    toast(added ? `已收藏「${item.name}」` : `已取消收藏「${item.name}」`, added ? 'success' : 'info');
+  };
 
   // 收起态就要有结论：先读缓存（展开时才真正探测）。
   // 依赖 group.key 而不是 items 数组——搜索页每次重渲染都会重建分组对象，
@@ -147,6 +170,14 @@ export function AggregatedCard({
     remarksList.length > 0 && remarksList.every((label) => label && label === remarksList[0])
       ? remarksList[0]
       : undefined;
+
+  const cardFavItem =
+    singleItem ??
+    sortedItems.find((i) => favoriteIds?.has(favoriteIdOf(i.sourceKey, i.vodId))) ??
+    sortedItems[0];
+  const isCardFavorited = Boolean(
+    cardFavItem && favoriteIds?.has(favoriteIdOf(cardFavItem.sourceKey, cardFavItem.vodId))
+  );
 
   return (
     <div
@@ -221,21 +252,40 @@ export function AggregatedCard({
             <span className="tag bg-chip text-muted truncate max-w-[80%]">
               {multi ? `${group.items.length} 个来源` : group.items[0].sourceName}
             </span>
-            {multi && (
-              <span className="flex items-center gap-1 shrink-0">
-                {/* 收起态先给结论：最高画质比「N 个来源」更影响要不要点开 */}
-                {progress.best && (
-                  <span
-                    className="tag bg-accent/15 text-accent font-medium"
-                    title={
-                      progress.known < progress.total
-                        ? `已探到 / 实测的最高画质（${progress.known}/${progress.total} 个来源已有结论）`
-                        : '已探到 / 实测的最高画质'
-                    }
-                  >
-                    {progress.best}
-                  </span>
-                )}
+            <span className="flex items-center gap-1 shrink-0">
+              {/* 收起态先给结论：最高画质比「N 个来源」更影响要不要点开 */}
+              {multi && progress.best && (
+                <span
+                  className="tag bg-accent/15 text-accent font-medium"
+                  title={
+                    progress.known < progress.total
+                      ? `已探到 / 实测的最高画质（${progress.known}/${progress.total} 个来源已有结论）`
+                      : '已探到 / 实测的最高画质'
+                  }
+                >
+                  {progress.best}
+                </span>
+              )}
+              {cardFavItem && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    void handleToggleItemFavorite(cardFavItem);
+                  }}
+                  onKeyDown={(e) => e.stopPropagation()}
+                  className={cn(
+                    'p-1 rounded transition-colors hover:bg-hover',
+                    isCardFavorited ? 'text-warning' : 'text-faint hover:text-warning'
+                  )}
+                  aria-label={isCardFavorited ? `取消收藏 ${group.name}` : `收藏 ${group.name}`}
+                  title={isCardFavorited ? '取消收藏' : '加入收藏'}
+                >
+                  <Icon name="star" filled={isCardFavorited} className="w-3.5 h-3.5" />
+                </button>
+              )}
+              {multi && (
                 <svg
                   className={cn('w-4 h-4 text-faint transition-transform', expanded && 'rotate-180')}
                   fill="none"
@@ -245,8 +295,8 @@ export function AggregatedCard({
                 >
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                 </svg>
-              </span>
-            )}
+              )}
+            </span>
           </div>
         </div>
       </div>
@@ -281,6 +331,7 @@ export function AggregatedCard({
               const itemKey = qualityKey(item.sourceKey, item.vodId);
               const label = compactRemarks(item.remarks);
               const isBest = itemKey === bestKey;
+              const rowFavorited = Boolean(favoriteIds?.has(favoriteIdOf(item.sourceKey, item.vodId)));
               return (
                 <div
                   key={`${item.sourceKey}_${item.vodId}`}
@@ -319,6 +370,23 @@ export function AggregatedCard({
                   {!sharedRemarks && label && (
                     <span className="text-faint shrink-0 tabular-nums">{label}</span>
                   )}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      void handleToggleItemFavorite(item);
+                    }}
+                    onKeyDown={(e) => e.stopPropagation()}
+                    className={cn(
+                      'p-1 rounded shrink-0 transition-colors hover:bg-surface-raised',
+                      rowFavorited ? 'text-warning' : 'text-faint hover:text-warning'
+                    )}
+                    aria-label={rowFavorited ? `取消收藏 ${item.sourceName}` : `收藏 ${item.sourceName}`}
+                    title={rowFavorited ? '取消收藏' : '收藏此来源'}
+                  >
+                    <Icon name="star" filled={rowFavorited} className="w-3.5 h-3.5" />
+                  </button>
                   <svg
                     className="w-3.5 h-3.5 text-accent shrink-0 transition-transform group-hover:translate-x-0.5"
                     fill="currentColor"
@@ -338,11 +406,36 @@ export function AggregatedCard({
 }
 
 /** 影片卡片：封面加载失败时逐级降级到占位图（未聚合的单一结果使用） */
-export function VideoCard({ item, onClick }: { item: SearchResultItem; onClick: () => void }) {
+export function VideoCard({
+  item,
+  onClick,
+  favoriteIds,
+}: {
+  item: SearchResultItem;
+  onClick: () => void;
+  favoriteIds?: Set<string>;
+}) {
   const imageProxyMode = useAppStore((s) => s.imageProxyMode);
   const customImageProxy = useAppStore((s) => s.customImageProxy);
+  const { toast } = useToast();
   const [imgFailed, setImgFailed] = useState(false);
   const showImg = !!item.pic && !imgFailed;
+  const isFavorited = Boolean(favoriteIds?.has(favoriteIdOf(item.sourceKey, item.vodId)));
+
+  const handleToggleFavorite = async () => {
+    const added = await toggleFavorite({
+      sourceKey: item.sourceKey,
+      sourceName: item.sourceName,
+      sourceUrl: item.sourceUrl,
+      vodId: item.vodId,
+      title: item.name,
+      pic: item.pic,
+      typeName: item.typeName,
+      year: item.year,
+      remarks: formatRemarks(item.remarks) || undefined,
+    });
+    toast(added ? `已收藏「${item.name}」` : `已取消收藏「${item.name}」`, added ? 'success' : 'info');
+  };
 
   return (
     <div
@@ -390,8 +483,25 @@ export function VideoCard({ item, onClick }: { item: SearchResultItem; onClick: 
             </div>
             <p className="text-xs text-muted line-clamp-2 mb-2">{formatRemarks(item.remarks) || '暂无介绍'}</p>
           </div>
-          <div className="flex items-center justify-between mt-auto pt-1.5 border-t border-line">
+          <div className="flex items-center justify-between gap-1.5 mt-auto pt-1.5 border-t border-line">
             <span className="tag bg-chip text-muted truncate max-w-[80%]">{item.sourceName}</span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                void handleToggleFavorite();
+              }}
+              onKeyDown={(e) => e.stopPropagation()}
+              className={cn(
+                'p-1 rounded shrink-0 transition-colors hover:bg-hover',
+                isFavorited ? 'text-warning' : 'text-faint hover:text-warning'
+              )}
+              aria-label={isFavorited ? `取消收藏 ${item.name}` : `收藏 ${item.name}`}
+              title={isFavorited ? '取消收藏' : '加入收藏'}
+            >
+              <Icon name="star" filled={isFavorited} className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
       </div>

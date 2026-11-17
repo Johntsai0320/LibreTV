@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { useAppStore } from '@/lib/store';
+import { normalizeSourceUrl, useAppStore } from '@/lib/store';
 import { useToast } from './toast';
 import { api } from '@/lib/client-api';
 import { formatRelativeTime, hostnameOf, validateSourceUrl, cn } from '@/lib/utils';
@@ -14,11 +14,12 @@ import { Icon } from './icon';
  * 以及部署者预置源展示。工具条、徽章、空态与撤销语义与点播源面板保持一致。
  */
 
-type LiveFilter = 'all' | 'enabled' | 'disabled' | 'sub' | 'manual';
+type LiveFilter = 'all' | 'fav' | 'enabled' | 'disabled' | 'sub' | 'manual';
 
-// 与点播源面板保持同一组筛选项与顺序：先状态（已启用 / 已停用），后来源（来自订阅 / 手动添加）
+// 与点播源面板保持同一组筛选项与顺序：全部 / 已收藏 / 状态（已启用 / 已停用） / 来源（来自订阅 / 手动添加）
 const LIVE_FILTERS: { id: LiveFilter; label: string }[] = [
   { id: 'all', label: '全部' },
+  { id: 'fav', label: '已收藏' },
   { id: 'enabled', label: '已启用' },
   { id: 'disabled', label: '已停用' },
   { id: 'sub', label: '来自订阅' },
@@ -44,6 +45,11 @@ export function LiveSourceManager() {
   const [filter, setFilter] = useState<LiveFilter>('all');
   const { tests, runTest } = useSourceTests();
 
+  const favUrlSet = useMemo(
+    () => new Set(store.liveSourceFavorites.map(normalizeSourceUrl)),
+    [store.liveSourceFavorites]
+  );
+
   const rows = useMemo<LiveRow[]>(() => {
     const preset: LiveRow[] = store.liveEnvSources.map((s) => ({
       url: s.url,
@@ -62,15 +68,20 @@ export function LiveSourceManager() {
     }));
     const all = [...preset, ...subs];
     const q = query.trim().toLowerCase();
-    return all.filter((r) => {
-      if (filter === 'enabled' && !store.liveSelectedUrls.includes(r.url)) return false;
-      if (filter === 'disabled' && store.liveSelectedUrls.includes(r.url)) return false;
-      if (filter === 'sub' && r.fromSubscriptions.length === 0) return false;
-      if (filter === 'manual' && !(r.fromSubscriptions.length === 0 && !r.preset)) return false;
-      if (!q) return true;
-      return r.label.toLowerCase().includes(q) || r.url.toLowerCase().includes(q);
-    });
-  }, [store.liveEnvSources, store.liveSubscriptions, store.liveSelectedUrls, query, filter]);
+    return all
+      .filter((r) => {
+        if (filter === 'fav' && !favUrlSet.has(normalizeSourceUrl(r.url))) return false;
+        if (filter === 'enabled' && !store.liveSelectedUrls.includes(r.url)) return false;
+        if (filter === 'disabled' && store.liveSelectedUrls.includes(r.url)) return false;
+        if (filter === 'sub' && r.fromSubscriptions.length === 0) return false;
+        if (filter === 'manual' && !(r.fromSubscriptions.length === 0 && !r.preset)) return false;
+        if (!q) return true;
+        return r.label.toLowerCase().includes(q) || r.url.toLowerCase().includes(q);
+      })
+      .map((r, index) => ({ r, index, fav: favUrlSet.has(normalizeSourceUrl(r.url)) ? 1 : 0 }))
+      .sort((a, b) => b.fav - a.fav || a.index - b.index)
+      .map((entry) => entry.r);
+  }, [store.liveEnvSources, store.liveSubscriptions, store.liveSelectedUrls, favUrlSet, query, filter]);
 
   // 编辑中的手动源（与「添加」共用同一表单）
   const editingSource = editing ? store.liveSubscriptions.find((s) => s.url === editing) : undefined;
@@ -183,6 +194,7 @@ export function LiveSourceManager() {
               {rows.map((row) => {
                 const enabled = store.liveSelectedUrls.includes(row.url);
                 const fromSubscription = row.fromSubscriptions.length > 0;
+                const isFavorite = favUrlSet.has(normalizeSourceUrl(row.url));
                 return (
                   <li
                     key={row.url}
@@ -224,6 +236,19 @@ export function LiveSourceManager() {
                           {row.lastSync && ` · 同步于 ${formatRelativeTime(row.lastSync)}`}
                         </div>
                       </div>
+                      <button
+                        type="button"
+                        className={cn(
+                          'rounded-md p-1.5 transition-colors hover:bg-hover shrink-0',
+                          isFavorite ? 'text-warning' : 'text-muted hover:text-warning'
+                        )}
+                        onClick={() => useAppStore.getState().toggleLiveSourceFavorite(row.url)}
+                        aria-label={isFavorite ? `取消收藏 ${row.label}` : `收藏 ${row.label}`}
+                        aria-pressed={isFavorite}
+                        title={isFavorite ? '取消常用收藏' : '设为常用（置顶显示）'}
+                      >
+                        <Icon name="star" filled={isFavorite} className="w-4 h-4" />
+                      </button>
                       <TestBadge
                         state={tests[row.url]}
                         onTest={() => runTest(row.url, () => api.liveTest(row.url))}

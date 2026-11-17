@@ -220,6 +220,10 @@ interface AppState extends AppSettings {
   liveSelectedUrls: string[];
   /** 收藏频道（按流 URL 唯一标识） */
   liveFavorites: string[];
+  /** 收藏的点播片源（按归一化 URL 唯一标识，跨订阅重新同步保留） */
+  vodFavoriteUrls: string[];
+  /** 收藏的直播源播放列表（按 M3U URL 唯一标识） */
+  liveSourceFavorites: string[];
   /** 最近观看频道（上限 20） */
   liveRecent: LiveRecentEntry[];
   /** 测活结果缓存（6 小时有效，跨会话持久化） */
@@ -269,6 +273,8 @@ interface AppState extends AppSettings {
   /** 批量启停直播源：一次 set 完成，避免逐条 toggle 的 O(n) 次持久化 */
   toggleLiveSelectedMany: (urls: string[]) => void;
   toggleLiveFavorite: (channelUrl: string) => void;
+  toggleVodSourceFavorite: (sourceUrl: string) => void;
+  toggleLiveSourceFavorite: (sourceUrl: string) => void;
   addLiveRecent: (entry: Omit<LiveRecentEntry, 'timestamp'>) => void;
   /** 删除单条最近观看（按流 URL） */
   removeLiveRecent: (channelUrl: string) => void;
@@ -323,6 +329,10 @@ function nextCustomKey(apiList: SourceConfig[]): string {
  * 需要在直接写盘前 flush 缓冲，而运行时依赖方向是 store → db，不能反向引用）。
  */
 
+export function normalizeSourceUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '');
+}
+
 const persistStorage = createThrottledStorage();
 
 export const useAppStore = create<AppState>()(
@@ -337,6 +347,8 @@ export const useAppStore = create<AppState>()(
       liveSubscriptions: [],
       liveSelectedUrls: [],
       liveFavorites: [],
+      vodFavoriteUrls: [],
+      liveSourceFavorites: [],
       liveRecent: [],
       liveProbeResults: {},
       sourceHealth: {},
@@ -690,6 +702,30 @@ export const useAppStore = create<AppState>()(
         });
       },
 
+      toggleVodSourceFavorite: (sourceUrl) => {
+        const normalized = normalizeSourceUrl(sourceUrl);
+        if (!normalized) return;
+        const cur = get().vodFavoriteUrls;
+        const exists = cur.some((u) => normalizeSourceUrl(u) === normalized);
+        set({
+          vodFavoriteUrls: exists
+            ? cur.filter((u) => normalizeSourceUrl(u) !== normalized)
+            : [...cur, normalized],
+        });
+      },
+
+      toggleLiveSourceFavorite: (sourceUrl) => {
+        const normalized = normalizeSourceUrl(sourceUrl);
+        if (!normalized) return;
+        const cur = get().liveSourceFavorites;
+        const exists = cur.some((u) => normalizeSourceUrl(u) === normalized);
+        set({
+          liveSourceFavorites: exists
+            ? cur.filter((u) => normalizeSourceUrl(u) !== normalized)
+            : [...cur, normalized],
+        });
+      },
+
       addLiveRecent: (entry) => {
         const rest = get().liveRecent.filter((r) => r.url !== entry.url);
         set({ liveRecent: [{ ...entry, timestamp: Date.now() }, ...rest].slice(0, 20) });
@@ -871,12 +907,15 @@ export const useAppStore = create<AppState>()(
       // v7：片尾结束也并入同一开关（不再单独提供 autoSkipOutro）。
       // v8：订阅新增 refreshDays / failStreak——两者都缺省即「纯手动 + 无失败记录」，
       //     与旧行为完全一致，因此无需改写存量数据，仅借版本号让 migrate 跑一遍。
+      // v9：新增点播片源收藏（vodFavoriteUrls）与直播源播放列表收藏（liveSourceFavorites）。
       // 此前未声明 version 的存量数据会被视为 v0 并走 migrate 补齐。
-      version: 8,
+      version: 9,
       migrate: (persisted, version) => {
         const state = { ...((persisted ?? {}) as Partial<AppState>) };
         if (!Array.isArray(state.liveRecent)) state.liveRecent = [];
         if (!Array.isArray(state.liveSubscriptions)) state.liveSubscriptions = [];
+        if (!Array.isArray(state.vodFavoriteUrls)) state.vodFavoriteUrls = [];
+        if (!Array.isArray(state.liveSourceFavorites)) state.liveSourceFavorites = [];
 
         // v3 的片头/片尾双标记 → v4 的 segments（纯函数，脏数据在内部丢弃）
         state.skipMarks = migrateSkipMarks(
@@ -940,6 +979,8 @@ export const useAppStore = create<AppState>()(
         liveSubscriptions: s.liveSubscriptions,
         liveSelectedUrls: s.liveSelectedUrls,
         liveFavorites: s.liveFavorites,
+        vodFavoriteUrls: s.vodFavoriteUrls,
+        liveSourceFavorites: s.liveSourceFavorites,
         liveRecent: s.liveRecent,
         sourceHealth: s.sourceHealth,
         qualityMap: s.qualityMap,

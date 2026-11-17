@@ -1,6 +1,7 @@
 'use client';
 
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { Header } from '@/components/header';
@@ -9,6 +10,7 @@ import { DetailModal } from '@/components/detail-modal';
 import { AggregatedCard, aggregateResults } from '@/components/video-card';
 import { useAppStore, resolveSource, isInDisabledSubscription, isSourceDisabled } from '@/lib/store';
 import { api } from '@/lib/client-api';
+import { db } from '@/lib/db';
 import type { SearchResultItem, SourceSearchOutcome } from '@/lib/types';
 import { SearchHistoryDropdown, useSearchHistory } from '@/components/search-history';
 import { cn, formatDisableTtl, validateSourceUrl } from '@/lib/utils';
@@ -50,6 +52,8 @@ function HomeContent() {
   /** 流式搜索中已结算的源（data 就绪前用于增量渲染） */
   const [streamedOutcomes, setStreamedOutcomes] = useState<SourceSearchOutcome[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const favKeys = useLiveQuery(() => db.favorites.toCollection().primaryKeys(), [], [] as string[]);
+  const favoriteIds = useMemo(() => new Set(favKeys.map(String)), [favKeys]);
 
   // URL 驱动搜索：?s= 变化时回填输入框
   useEffect(() => {
@@ -337,6 +341,7 @@ function HomeContent() {
                       key={group.key}
                       group={group}
                       sources={selectedSources}
+                      favoriteIds={favoriteIds}
                       onOpen={(item) => setDetailItem(item)}
                     />
                   ))}

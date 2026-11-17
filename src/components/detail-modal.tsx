@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/client-api';
 import type { SearchResultItem, VideoDetail } from '@/lib/types';
@@ -10,14 +11,14 @@ import { SmartImage } from './smart-image';
 import { useAppStore, resolveSource } from '@/lib/store';
 import { useToast } from './toast';
 import { cn } from '@/lib/utils';
-import { addSearchHistory } from '@/lib/db';
+import { addSearchHistory, db, favoriteIdOf, toggleFavorite } from '@/lib/db';
 import { copyToClipboard } from '@/lib/clipboard';
 import { EmptyState, ErrorState, LoadingState } from './states';
 import { useFocusTrap } from './use-focus-trap';
 import { Icon } from './icon';
 
 /**
- * 详情弹窗：剧集列表 + 排序 + 复制链接。
+ * 详情弹窗：剧集列表 + 排序 + 收藏 + 复制链接。
  * 剧集点击 → /watch 路由（URL 携带定位参数，可分享、可后退）。
  */
 
@@ -32,6 +33,11 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
   const [posterFailed, setPosterFailed] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const favEntry = useLiveQuery(
+    () => (item ? db.favorites.get(favoriteIdOf(item.sourceKey, item.vodId)) : undefined),
+    [item?.sourceKey, item?.vodId]
+  );
+  const isFavorited = Boolean(favEntry);
 
   // 打开时把焦点移入弹窗、Tab 圈闭在弹窗内、关闭后归还焦点
   useFocusTrap(Boolean(item), panelRef);
@@ -107,6 +113,26 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
     );
   };
 
+  const handleToggleFavorite = async () => {
+    const source = resolveSource(store, item.sourceKey, {
+      url: item.sourceUrl,
+      name: item.sourceName,
+    });
+    const added = await toggleFavorite({
+      sourceKey: item.sourceKey,
+      sourceName: item.sourceName || source?.name,
+      sourceUrl: item.sourceUrl || source?.url,
+      detail: source?.detail,
+      vodId: item.vodId,
+      title: item.name,
+      pic: item.pic || info?.cover,
+      typeName: item.typeName || info?.typeName,
+      year: item.year || info?.year,
+      remarks: formatRemarks(info?.remarks ?? item.remarks) || undefined,
+    });
+    toast(added ? `已收藏「${item.name}」` : `已取消收藏「${item.name}」`, added ? 'success' : 'info');
+  };
+
   const copyLinks = async () => {
     if (!detail) return;
     const ok = await copyToClipboard(detail.episodes.join('\n'));
@@ -146,15 +172,29 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
             <h2 className="text-lg font-semibold text-content break-words">{item.name}</h2>
             <span className="text-sm text-faint">{item.sourceName}</span>
           </div>
-          <button
-            className="p-1.5 rounded-md text-muted hover:text-content hover:bg-hover shrink-0"
-            onClick={onClose}
-            aria-label="关闭"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              className={cn(
+                'btn-ghost btn-sm',
+                isFavorited && 'text-warning'
+              )}
+              onClick={() => void handleToggleFavorite()}
+              aria-label={isFavorited ? '取消收藏' : '收藏'}
+              title={isFavorited ? '取消收藏' : '加入收藏'}
+            >
+              <Icon name="star" filled={isFavorited} className="w-4 h-4" />
+              <span>{isFavorited ? '已收藏' : '收藏'}</span>
+            </button>
+            <button
+              className="p-1.5 rounded-md text-muted hover:text-content hover:bg-hover shrink-0"
+              onClick={onClose}
+              aria-label="关闭"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         <div className="p-5 pt-4 pb-[calc(1.25rem_+_env(safe-area-inset-bottom))] sm:pb-5 flex-1 min-h-0 overflow-y-auto overscroll-contain scrollbar-thin">

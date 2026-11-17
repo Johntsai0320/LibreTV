@@ -127,4 +127,14 @@ describe('fetchUpstream 安全跳转', () => {
     const thrown = await rejection(fetchUpstream(PUBLIC_URL));
     expect(thrown).toBe(err);
   });
+
+  it('外部 signal 已中止时不发起底层 fetch 请求并透传 AbortError', async () => {
+    const spy = vi.fn();
+    vi.stubGlobal('fetch', spy);
+    const ac = new AbortController();
+    ac.abort(new DOMException('已取消', 'AbortError'));
+    const thrown = await rejection(fetchUpstream(PUBLIC_URL, { signal: ac.signal }));
+    expect(thrown.name).toBe('AbortError');
+    expect(spy).not.toHaveBeenCalled();
+  });
 });

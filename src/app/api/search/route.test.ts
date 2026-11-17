@@ -3,6 +3,18 @@ import { POST } from './route';
 import { SESSION_COOKIE, signSession } from '@/lib/auth';
 import type { SearchResponse, SearchStreamEvent, SourceConfig } from '@/lib/types';
 
+vi.mock('@/lib/ssrf', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/ssrf')>();
+  return {
+    ...actual,
+    checkUpstreamAllowed: vi.fn(async (urlString: string) =>
+      actual.isValidProxyUrl(urlString)
+        ? { ok: true as const }
+        : { ok: false as const, reason: '目标地址不在允许范围内（仅支持公网 http/https）' }
+    ),
+  };
+});
+
 /**
  * 聚合搜索接口单测：跨源聚合、同源去重、精确命中置顶、成人内容过滤、
  * 失败源不影响整体、SSRF 字面量拒绝。上游一律 mock fetch，无真实网络。
@@ -370,17 +382,22 @@ describe('POST /api/search', () => {
           if (pg === '1') {
             return Promise.resolve(
               new Response(
-                cmsList([{ vod_id: 1, vod_name: '测试剧', type_name: '国产剧' }], 4),
+                cmsList([{ vod_id: 1, vod_name: '测试剧', type_name: '国产剧' }], 2),
                 { headers: { 'content-type': 'application/json' } }
               )
             );
           }
-          pg2Started();
+          if (init?.signal?.aborted) {
+            return Promise.reject(new DOMException('Aborted', 'AbortError'));
+          }
+          if (url.hostname === 'slowpg.example.com' && pg === '2') {
+            pg2Started();
+          }
           // 后续分页永远挂起，直到收到 abort signal
           return new Promise<Response>((_resolve, reject) => {
             init?.signal?.addEventListener('abort', () => {
               reject(new DOMException('Aborted', 'AbortError'));
-            });
+            }, { once: true });
           });
         })
       );
@@ -412,15 +429,21 @@ describe('POST /api/search', () => {
       vi.stubGlobal(
         'fetch',
         vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-          const wd = new URL(String(input)).searchParams.get('wd');
+          const url = new URL(String(input));
+          const wd = url.searchParams.get('wd');
           if (wd === '大陆') {
             return Promise.resolve(new Response(cmsList([]), { headers: { 'content-type': 'application/json' } }));
           }
-          tradStarted();
+          if (init?.signal?.aborted) {
+            return Promise.reject(new DOMException('Aborted', 'AbortError'));
+          }
+          if (url.hostname === 'varok.example.com' && wd === '大陸') {
+            tradStarted();
+          }
           return new Promise<Response>((_resolve, reject) => {
             init?.signal?.addEventListener('abort', () => {
               reject(new DOMException('Aborted', 'AbortError'));
-            });
+            }, { once: true });
           });
         })
       );

@@ -211,4 +211,115 @@ describe('POST /api/search', () => {
     const unauthorized = await POST(noCookie);
     expect(unauthorized.status).toBe(401);
   });
+
+  it('繁体查询自动先查简体命中，未命中时回退繁体变体', async () => {
+    const queries: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      const wd = url.searchParams.get('wd') || '';
+      queries.push(wd);
+      if (url.hostname === 'simp.example.com') {
+        return new Response(
+          wd === '周处除三害'
+            ? cmsList([
+                { vod_id: 1, vod_name: '周处除三害', type_name: '动作片' },
+                { vod_id: 2, vod_name: '周处除三害【解说】', type_name: '动作片' },
+              ])
+            : cmsList([]),
+          { headers: { 'content-type': 'application/json' } }
+        );
+      }
+      // 繁体源仅繁体关键字能命中
+      return new Response(
+        wd === '周處除三害'
+          ? cmsList([{ vod_id: 9, vod_name: '周處除三害', type_name: '動作片' }])
+          : cmsList([]),
+        { headers: { 'content-type': 'application/json' } }
+      );
+    }));
+
+    const res = await POST(
+      makeRequest({
+        wd: '周處除三害',
+        sources: [
+          { key: 'simp', name: '简体源', url: 'https://simp.example.com/api.php' },
+          { key: 'trad', name: '繁体源', url: 'https://trad.example.com/api.php' },
+        ],
+      })
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as SearchResponse;
+    expect(data.list.map((i) => `${i.sourceKey}:${i.vodId}`)).toEqual(['simp:1', 'trad:9', 'simp:2']);
+    expect(queries).toContain('周处除三害');
+    expect(queries).toContain('周處除三害');
+  });
+
+  it('支持 | 多分支合并去重、- 排除过滤与空白 AND 回退', async () => {
+    const requestedWds: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const wd = new URL(String(input)).searchParams.get('wd') || '';
+      requestedWds.push(wd);
+      if (wd === '繁花') {
+        return new Response(
+          cmsList([
+            { vod_id: 10, vod_name: '繁花', type_name: '国产剧' },
+            { vod_id: 11, vod_name: '繁花【影视解说】', type_name: '解说' },
+          ]),
+          { headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (wd === '三体') {
+        return new Response(
+          cmsList([
+            { vod_id: 20, vod_name: '三体', type_name: '科幻' },
+            // 故意重复 id=10 验证同源跨分支去重
+            { vod_id: 10, vod_name: '繁花', type_name: '国产剧' },
+          ]),
+          { headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (wd === '测试剧') {
+        return new Response(
+          cmsList([
+            { vod_id: 30, vod_name: '测试剧 2024', type_name: '剧情' },
+            { vod_id: 31, vod_name: '测试剧 2023', type_name: '剧情' },
+          ]),
+          { headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response(cmsList([]), { headers: { 'content-type': 'application/json' } });
+    }));
+
+    // 1. (繁花 | 三體) -解說
+    const orRes = await POST(
+      makeRequest({
+        wd: '(繁花 | 三體) -解說',
+        sources: [{ key: 'logic', name: '逻辑源', url: 'https://logic.example.com/api.php' }],
+      })
+    );
+    const orData = (await orRes.json()) as SearchResponse;
+    expect(orData.list.map((i) => i.name)).toEqual(['繁花', '三体']);
+    expect(requestedWds.some((q) => q.includes('-'))).toBe(false);
+
+    // 2. 空白 AND「測試劇 2024」整体查无时自动回退核心词「测试剧」，并由本地过滤出 2024
+    const spaceRes = await POST(
+      makeRequest({
+        wd: '測試劇 2024',
+        sources: [{ key: 'space', name: '空白源', url: 'https://space.example.com/api.php' }],
+      })
+    );
+    const spaceData = (await spaceRes.json()) as SearchResponse;
+    expect(spaceData.list.map((i) => i.name)).toEqual(['测试剧 2024']);
+
+    // 3. 纯否定词不请求上游
+    const callsBeforePureNot = requestedWds.length;
+    const notRes = await POST(
+      makeRequest({
+        wd: '-解說',
+        sources: [{ key: 'purenot', name: '否定源', url: 'https://purenot.example.com/api.php' }],
+      })
+    );
+    expect(await notRes.json()).toEqual({ list: [], failures: [] });
+    expect(requestedWds.length).toBe(callsBeforePureNot);
+  });
 });

@@ -16,10 +16,10 @@ import { SmartImage } from './smart-image';
 import { Dropdown } from './dropdown';
 import { useAppStore } from '@/lib/store';
 import {
+  compileLiveQuery,
   isSlowSource,
   matchesAlive,
-  matchesKeyword,
-  normalizeForSearch,
+  matchesCompiledKeyword,
   sortChannels,
   type AliveFilter,
   type LiveSortMode,
@@ -190,7 +190,7 @@ export function LiveChannelList({ channels, groups, currentUrl, onSelect, onFilt
 
   const favSet = useMemo(() => new Set(liveFavorites), [liveFavorites]);
   const recentOrder = useMemo(() => new Map(liveRecent.map((r, i) => [r.url, i] as const)), [liveRecent]);
-  const normalizedKeyword = useMemo(() => normalizeForSearch(debouncedKeyword.trim()), [debouncedKeyword]);
+  const compiledKeyword = useMemo(() => compileLiveQuery(debouncedKeyword), [debouncedKeyword]);
 
   // 先做视图/分组/搜索/排序（不含可用性筛选）：可用性计数必须基于这份列表，
   // 否则点击筛选后 filtered 收缩，两个计数会跟着变小、与实际展示对不上
@@ -209,11 +209,11 @@ export function LiveChannelList({ channels, groups, currentUrl, onSelect, onFilt
     if (view !== 'recent' && group) {
       list = list.filter((c) => c.group === group);
     }
-    if (normalizedKeyword) {
-      list = list.filter((c) => matchesKeyword(c, normalizedKeyword));
+    if (compiledKeyword) {
+      list = list.filter((c) => matchesCompiledKeyword(c, compiledKeyword));
     }
     return sortChannels(list, sortMode, { recentOrder, probeOf: (url) => probeResults.get(url) });
-  }, [channels, favSet, liveRecent, view, group, normalizedKeyword, sortMode, recentOrder, probeResults]);
+  }, [channels, favSet, liveRecent, view, group, compiledKeyword, sortMode, recentOrder, probeResults]);
 
   const filtered = useMemo(
     () =>
@@ -326,7 +326,8 @@ export function LiveChannelList({ channels, groups, currentUrl, onSelect, onFilt
       <div className="px-3 py-2 shrink-0 flex items-center gap-1.5">
         <input
           className="input w-full !py-1.5 text-xs"
-          placeholder="搜索频道 / tvg-id / 分组..."
+          placeholder="搜索频道 / 分组（支持 & / | / 空格 / -排除）..."
+          title="支持简繁自动匹配与逻辑搜寻：空格 / & (且)、| (或)、- (排除)、() 分组"
           value={keyword}
           maxLength={60}
           onChange={(e) => setKeyword(e.target.value)}

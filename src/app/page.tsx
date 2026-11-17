@@ -216,7 +216,8 @@ function HomeContent() {
                 <input
                   ref={inputRef}
                   className="flex-1 min-w-0 pr-2 bg-transparent text-sm text-content placeholder:text-faint focus:outline-none"
-                  placeholder="输入影片名称..."
+                  placeholder="输入影片名称（支持繁简、空格/&、|、-排除）..."
+                  title="支持简繁自动转换与逻辑搜寻：空格 / & (且)、| (或)、- (排除)、() 分组"
                   value={input}
                   maxLength={100}
                   onChange={(e) => {

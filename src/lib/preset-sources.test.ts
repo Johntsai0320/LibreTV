@@ -66,6 +66,9 @@ describe('public/sources.json preset source list', () => {
         expect(isValidProxyUrl(l.epg), `Invalid EPG URL: ${l.epg}`).toBe(true);
       }
     }
+    const taiwanLive = json.liveSources.filter((l) => l.name.includes('台灣'));
+    expect(taiwanLive.length).toBeGreaterThanOrEqual(4);
+    expect(taiwanLive.every((l) => Boolean(l.epg))).toBe(true);
   });
 
   it('Dockerfile ENV DEFAULT_SUBSCRIPTIONS parses cleanly with getEnvSubscriptions()', () => {

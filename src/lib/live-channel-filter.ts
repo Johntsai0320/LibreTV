@@ -6,6 +6,9 @@
  * - 排序：默认 / 名称 / 分组 / 可用性优先 / 最近观看。
  */
 
+import { evaluateSearchAst, parseSearchQuery, type SearchQueryNode } from './search-query';
+import { toSimplified } from './zh-conv';
+
 /** 与 store 的 LiveProbeEntry 结构兼容的测活结果子集（避免 lib 依赖 client store 类型） */
 export interface ProbeLike {
   ok: boolean;
@@ -38,7 +41,7 @@ export function isSlowSource(probe: ProbeLike | undefined): boolean {
 const SEPARATOR_RE = /[\s\-_./·|+()（）[\]【】]/g;
 
 export function normalizeForSearch(input: string): string {
-  return input.toLowerCase().replace(SEPARATOR_RE, '');
+  return toSimplified(input).toLowerCase().replace(SEPARATOR_RE, '');
 }
 
 export interface KeywordMatchable {
@@ -47,13 +50,59 @@ export interface KeywordMatchable {
   group?: string;
 }
 
-/** 关键字匹配台名 / tvg-id / 分组名（三者都做分隔符归一化）；空关键字恒匹配 */
-export function matchesKeyword(channel: KeywordMatchable, normalizedKeyword: string): boolean {
-  if (!normalizedKeyword) return true;
-  if (normalizeForSearch(channel.name).includes(normalizedKeyword)) return true;
-  if (channel.tvgId && normalizeForSearch(channel.tvgId).includes(normalizedKeyword)) return true;
-  if (channel.group && normalizeForSearch(channel.group).includes(normalizedKeyword)) return true;
-  return false;
+function normalizeLiveAst(node: SearchQueryNode): SearchQueryNode | undefined {
+  switch (node.type) {
+    case 'term': {
+      const normalized = normalizeForSearch(node.value);
+      return normalized ? { type: 'term', value: normalized, quoted: node.quoted } : undefined;
+    }
+    case 'not': {
+      const operand = normalizeLiveAst(node.operand);
+      return operand ? { type: 'not', operand } : undefined;
+    }
+    case 'and': {
+      const left = normalizeLiveAst(node.left);
+      const right = normalizeLiveAst(node.right);
+      if (!left) return right;
+      if (!right) return left;
+      return { type: 'and', left, right, explicit: node.explicit };
+    }
+    case 'or': {
+      const left = normalizeLiveAst(node.left);
+      const right = normalizeLiveAst(node.right);
+      if (!left) return right;
+      if (!right) return left;
+      return { type: 'or', left, right };
+    }
+  }
+}
+
+export type CompiledLiveQuery = SearchQueryNode;
+
+/** 預先編譯頻道搜尋條件（支援簡繁通用與 & / | / 空白 AND / - / ! / () 邏輯） */
+export function compileLiveQuery(rawKeyword: string): CompiledLiveQuery | undefined {
+  const { ast } = parseSearchQuery(rawKeyword);
+  if (!ast) return undefined;
+  return normalizeLiveAst(ast);
+}
+
+export function matchesCompiledKeyword(
+  channel: KeywordMatchable,
+  compiled: CompiledLiveQuery | undefined
+): boolean {
+  if (!compiled) return true;
+  const nName = normalizeForSearch(channel.name);
+  const nTvgId = channel.tvgId ? normalizeForSearch(channel.tvgId) : '';
+  const nGroup = channel.group ? normalizeForSearch(channel.group) : '';
+  return evaluateSearchAst(
+    compiled,
+    (term) => nName.includes(term) || nTvgId.includes(term) || nGroup.includes(term)
+  );
+}
+
+/** 关键字匹配台名 / tvg-id / 分组名（支持分隔符归一化、简繁通用与布尔逻辑）；空关键字恒匹配 */
+export function matchesKeyword(channel: KeywordMatchable, keyword: string): boolean {
+  return matchesCompiledKeyword(channel, compileLiveQuery(keyword));
 }
 
 /**

@@ -2,8 +2,10 @@ import { NextResponse } from 'next/server';
 import { guardRequest } from '@/lib/api-guard';
 import { cmsRequestHeaders, filterAdultResults, filterRelevantResults, normalizeTitle, parseSearchList } from '@/lib/cms-parser';
 import { fetchUpstream, getCache, setCache } from '@/lib/fetch-utils';
+import { extractUpstreamPlans } from '@/lib/search-query';
 import { checkUpstreamAllowed } from '@/lib/ssrf';
-import type { SearchResponse, SearchStreamEvent, SourceConfig, SourceSearchOutcome } from '@/lib/types';
+import { getSearchVariants } from '@/lib/zh-conv-server';
+import type { SearchResponse, SearchResultItem, SearchStreamEvent, SourceConfig, SourceSearchOutcome } from '@/lib/types';
 
 export const runtime = 'nodejs';
 
@@ -72,6 +74,11 @@ async function searchSource(source: SourceConfig, wd: string): Promise<SourceSea
     return finish({ sourceKey: source.key, ok: false, list: [], error: verdict.reason });
   }
 
+  const plans = extractUpstreamPlans(wd);
+  if (plans.length === 0) {
+    return finish({ sourceKey: source.key, ok: true, list: [] });
+  }
+
   // 死线到点中断该源所有在途分页请求，避免后台继续空耗
   const controller = new AbortController();
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
@@ -91,8 +98,8 @@ async function searchSource(source: SourceConfig, wd: string): Promise<SourceSea
   });
 
   const base = source.url.replace(/\/+$/, '');
-  const fetchPage = async (page: number) => {
-    const api = `${base}?ac=videolist&wd=${encodeURIComponent(wd)}&pg=${page}`;
+  const fetchPage = async (queryWd: string, page: number) => {
+    const api = `${base}?ac=videolist&wd=${encodeURIComponent(queryWd)}&pg=${page}`;
     const res = await fetchUpstream(api, {
       timeoutMs: 8000,
       headers: cmsRequestHeaders(),
@@ -102,25 +109,65 @@ async function searchSource(source: SourceConfig, wd: string): Promise<SourceSea
     return res.json();
   };
 
-  const run = async (): Promise<SourceSearchOutcome> => {
-    const first = await fetchPage(1);
-    const list = parseSearchList(first, source);
-    // 源站真实总页数与配置上限取较小者；pagecount 缺失或非法时视为 1 页
-    const rawPageCount = parseInt(String((first as { pagecount?: unknown }).pagecount ?? '1'), 10);
-    const pageCount = Math.min(Number.isFinite(rawPageCount) ? Math.max(1, rawPageCount) : 1, SEARCH_MAX_PAGES);
-    if (pageCount > 1) {
-      const extraPages = await Promise.all(
-        Array.from({ length: pageCount - 1 }, (_, i) => i + 2).map(async (page) => {
-          try {
-            return parseSearchList(await fetchPage(page), source);
-          } catch {
-            return [];
-          }
-        })
-      );
-      list.push(...extraPages.flat());
+  const fetchWithVariants = async (term: string): Promise<SearchResultItem[]> => {
+    for (const queryWd of getSearchVariants(term)) {
+      const first = await fetchPage(queryWd, 1);
+      const list = parseSearchList(first, source);
+      if (list.length === 0) continue;
+
+      // 源站真实总页数与配置上限取较小者；pagecount 缺失或非法时视为 1 页
+      const rawPageCount = parseInt(String((first as { pagecount?: unknown }).pagecount ?? '1'), 10);
+      const pageCount = Math.min(Number.isFinite(rawPageCount) ? Math.max(1, rawPageCount) : 1, SEARCH_MAX_PAGES);
+      if (pageCount > 1) {
+        const extraPages = await Promise.all(
+          Array.from({ length: pageCount - 1 }, (_, i) => i + 2).map(async (page) => {
+            try {
+              return parseSearchList(await fetchPage(queryWd, page), source);
+            } catch {
+              return [];
+            }
+          })
+        );
+        list.push(...extraPages.flat());
+      }
+      return list;
     }
-    return { sourceKey: source.key, ok: true, list };
+    return [];
+  };
+
+  const fetchBranch = async (primary: string, fallback?: string): Promise<SearchResultItem[]> => {
+    const primaryList = await fetchWithVariants(primary);
+    if (primaryList.length > 0 || !fallback) return primaryList;
+    return fetchWithVariants(fallback);
+  };
+
+  const run = async (): Promise<SourceSearchOutcome> => {
+    if (plans.length === 1) {
+      const list = await fetchBranch(plans[0].primary, plans[0].fallback);
+      return { sourceKey: source.key, ok: true, list };
+    }
+    // 多个 OR 分支并发查询；部分分支失败时保留其余分支命中的结果，全失败才报错
+    const settled = await Promise.allSettled(plans.map((p) => fetchBranch(p.primary, p.fallback)));
+    const combined: SearchResultItem[] = [];
+    let firstError: unknown;
+    let anySucceeded = false;
+    for (const r of settled) {
+      if (r.status === 'fulfilled') {
+        anySucceeded = true;
+        combined.push(...r.value);
+      } else if (firstError === undefined) {
+        firstError = r.reason;
+      }
+    }
+    if (!anySucceeded && firstError !== undefined) throw firstError;
+
+    const seenVodIds = new Set<string>();
+    const deduped = combined.filter((item) => {
+      if (seenVodIds.has(item.vodId)) return false;
+      seenVodIds.add(item.vodId);
+      return true;
+    });
+    return { sourceKey: source.key, ok: true, list: deduped };
   };
 
   try {
@@ -164,11 +211,15 @@ function aggregateOutcomes(outcomes: SourceSearchOutcome[], wd: string, filterAd
   // 部分源站做分词/OR 模糊搜索（搜「摔跤吧！爸爸」返回一堆「爸爸XXX」），按关键词过滤
   list = filterRelevantResults(list, wd);
 
-  // 精确命中（忽略标点差异）排在最前，其余按名称（与旧版一致），名称相同按源名
-  const exact = normalizeTitle(wd);
+  // 精确命中（忽略标点、简繁差异）排在最前，其余按名称（与旧版一致），名称相同按源名
+  const exactKeys = new Set(
+    [wd, ...extractUpstreamPlans(wd).map((p) => p.primary)]
+      .map(normalizeTitle)
+      .filter(Boolean)
+  );
   list.sort((a, b) => {
-    const aExact = normalizeTitle(a.name || '') === exact ? 0 : 1;
-    const bExact = normalizeTitle(b.name || '') === exact ? 0 : 1;
+    const aExact = exactKeys.has(normalizeTitle(a.name || '')) ? 0 : 1;
+    const bExact = exactKeys.has(normalizeTitle(b.name || '')) ? 0 : 1;
     if (aExact !== bExact) return aExact - bExact;
     const nameCompare = (a.name || '').localeCompare(b.name || '', 'zh-Hans-CN');
     if (nameCompare !== 0) return nameCompare;

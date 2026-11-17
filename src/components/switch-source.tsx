@@ -7,6 +7,7 @@ import type { SourceConfig, SearchResultItem } from '@/lib/types';
 import { buildWatchUrl, cn } from '@/lib/utils';
 import { useAppStore, resolveSource } from '@/lib/store';
 import { qualityKey, qualityLabel } from '@/lib/quality';
+import { toSimplified } from '@/lib/zh-conv';
 import { useToast } from './toast';
 import { Icon } from './icon';
 import { SmartImage } from './smart-image';
@@ -114,13 +115,13 @@ export function SwitchSourceModal({
         // 匹配口径：优先完全同名，其次名称以标题开头（兼容「小偷 HD」「小偷[电影解说]」这类修饰名）。
         // 都没有则不展示该源——不再兜底取搜索第一条，避免把搜到的其他影片（如搜「小偷」
         // 命中的《宝贝 小偷与大盗》）误当成换源目标。
-        const title = currentTitle.trim();
+        const title = toSimplified(currentTitle.trim());
         const matched: Candidate[] = [];
         for (const s of sources) {
           const hits = list.filter((r) => r.sourceKey === s.key);
           const exact =
-            hits.find((r) => (r.name || '').trim() === title) ??
-            hits.find((r) => (r.name || '').trim().startsWith(title));
+            hits.find((r) => toSimplified((r.name || '').trim()) === title) ??
+            hits.find((r) => toSimplified((r.name || '').trim()).startsWith(title));
           if (exact) matched.push({ source: s, result: exact });
         }
 

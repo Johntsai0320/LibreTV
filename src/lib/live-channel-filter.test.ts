@@ -44,6 +44,26 @@ describe('matchesKeyword', () => {
   it('不相关关键字不匹配', () => {
     expect(matchesKeyword(c, normalizeForSearch('湖南卫视'))).toBe(false);
   });
+
+  it('支持简繁自动互通与布尔逻辑', () => {
+    const twNews = channel({ name: '民視新聞台', tvgId: 'ftv-news', group: '台灣新聞' });
+    const setNews = channel({ name: '三立新闻台', tvgId: 'set-news', group: '台湾新闻' });
+    const shopping = channel({ name: '東森購物台', tvgId: 'et-shop', group: '台灣購物' });
+    const sat = channel({ name: '衛視中文台', tvgId: 'star-cn', group: '香港台灣' });
+
+    expect(matchesKeyword(twNews, '新闻')).toBe(true);
+    expect(matchesKeyword(setNews, '台灣 新聞')).toBe(true);
+    expect(matchesKeyword(sat, '卫视')).toBe(true);
+
+    expect(matchesKeyword(twNews, '民視 | 三立')).toBe(true);
+    expect(matchesKeyword(setNews, '民視 | 三立')).toBe(true);
+    expect(matchesKeyword(shopping, '民視 | 三立')).toBe(false);
+
+    expect(matchesKeyword(twNews, '新聞 -購物')).toBe(true);
+    expect(matchesKeyword(shopping, '台灣 -購物')).toBe(false);
+    expect(matchesKeyword(twNews, '(民視 | 三立) & 新聞')).toBe(true);
+    expect(matchesKeyword(c, 'CCTV-1')).toBe(true);
+  });
 });
 
 describe('matchesAlive', () => {

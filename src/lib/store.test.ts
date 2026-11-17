@@ -351,6 +351,49 @@ describe('点播源自动停用阶梯', () => {
     expect(isSourceDisabled(store(), 'a')).toBe(false);
     expect(store().sourceHealth['a'].failStreak).toBe(0);
   });
+
+  it('防雪崩：≥5 个源整批全失败时跳过停用计数，避免锁死全部点播源', () => {
+    const keys = ['s1', 's2', 's3', 's4', 's5'];
+    const batch = keys.map((k) => ({ sourceKey: k, ok: false, error: '超时', timedOut: true, list: [] }));
+    expect(store().recordSourceHealth(batch)).toEqual([]);
+    expect(store().recordSourceHealth(batch)).toEqual([]);
+    for (const k of keys) {
+      expect(isSourceDisabled(store(), k)).toBe(false);
+      expect(store().sourceHealth[k]).toBeUndefined();
+    }
+  });
+
+  it('防雪崩：≥10 个源中 ≥85% 超时时跳过停用计数', () => {
+    const batch = [
+      ...Array.from({ length: 9 }, (_, i) => ({
+        sourceKey: `t${i}`,
+        ok: false,
+        error: '请求超时',
+        timedOut: true,
+        list: [],
+      })),
+      okOutcome('fast'),
+    ];
+    expect(store().recordSourceHealth(batch)).toEqual([]);
+    expect(store().recordSourceHealth(batch)).toEqual([]);
+    for (let i = 0; i < 9; i++) {
+      expect(isSourceDisabled(store(), `t${i}`)).toBe(false);
+    }
+  });
+
+  it('clearSourceHealthMany 批量清除指定源健康记录', () => {
+    failTwice('a');
+    failTwice('b');
+    failTwice('c');
+    expect(isSourceDisabled(store(), 'a')).toBe(true);
+    expect(isSourceDisabled(store(), 'b')).toBe(true);
+    expect(isSourceDisabled(store(), 'c')).toBe(true);
+
+    store().clearSourceHealthMany(['a', 'b']);
+    expect(isSourceDisabled(store(), 'a')).toBe(false);
+    expect(isSourceDisabled(store(), 'b')).toBe(false);
+    expect(isSourceDisabled(store(), 'c')).toBe(true);
+  });
 });
 
 describe('订阅整体开关', () => {

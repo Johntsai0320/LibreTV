@@ -322,4 +322,123 @@ describe('POST /api/search', () => {
     expect(await notRes.json()).toEqual({ list: [], failures: [] });
     expect(requestedWds.length).toBe(callsBeforePureNot);
   });
+
+  it('超过 50 个源全部参与搜索且服务端并发受控（≤12）', async () => {
+    let active = 0;
+    let maxActive = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        active++;
+        if (active > maxActive) maxActive = active;
+        await new Promise((r) => setTimeout(r, 15));
+        const idx = new URL(String(input)).hostname.split('.')[0];
+        active--;
+        return new Response(
+          cmsList([{ vod_id: idx, vod_name: `测试剧 ${idx}`, type_name: '国产剧' }]),
+          { headers: { 'content-type': 'application/json' } }
+        );
+      })
+    );
+
+    const sources: SourceConfig[] = Array.from({ length: 55 }, (_, i) => ({
+      key: `s${i}`,
+      name: `源${i}`,
+      url: `https://s${i}.pool.example.com/api.php`,
+    }));
+
+    const res = await POST(makeRequest({ wd: '测试剧', sources }));
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as SearchResponse;
+    expect(data.failures).toEqual([]);
+    expect(data.list).toHaveLength(55);
+    expect(maxActive).toBeLessThanOrEqual(12);
+  });
+
+  it('后续分页超时时仍保留第一页结果，不把可用源误判为超时失败', async () => {
+    vi.useFakeTimers();
+    try {
+      let pg2Started!: () => void;
+      const onPg2Started = new Promise<void>((resolve) => {
+        pg2Started = resolve;
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = new URL(String(input));
+          const pg = url.searchParams.get('pg');
+          if (pg === '1') {
+            return Promise.resolve(
+              new Response(
+                cmsList([{ vod_id: 1, vod_name: '测试剧', type_name: '国产剧' }], 4),
+                { headers: { 'content-type': 'application/json' } }
+              )
+            );
+          }
+          pg2Started();
+          // 后续分页永远挂起，直到收到 abort signal
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('Aborted', 'AbortError'));
+            });
+          });
+        })
+      );
+
+      const promise = POST(
+        makeRequest({
+          wd: '测试剧',
+          sources: [{ key: 'slowpg', name: '慢分页源', url: 'https://slowpg.example.com/api.php' }],
+        })
+      );
+      await onPg2Started;
+      await vi.advanceTimersByTimeAsync(13000);
+      const res = await promise;
+      const data = (await res.json()) as SearchResponse;
+      expect(data.failures).toEqual([]);
+      expect(data.list.map((i) => i.vodId)).toEqual(['1']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('简体主查询已返回 200 空结果时，繁体备援超时不记入失败', async () => {
+    vi.useFakeTimers();
+    try {
+      let tradStarted!: () => void;
+      const onTradStarted = new Promise<void>((resolve) => {
+        tradStarted = resolve;
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const wd = new URL(String(input)).searchParams.get('wd');
+          if (wd === '大陆') {
+            return Promise.resolve(new Response(cmsList([]), { headers: { 'content-type': 'application/json' } }));
+          }
+          tradStarted();
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('Aborted', 'AbortError'));
+            });
+          });
+        })
+      );
+
+      const promise = POST(
+        makeRequest({
+          wd: '大陸',
+          sources: [{ key: 'varok', name: '空结果源', url: 'https://varok.example.com/api.php' }],
+        })
+      );
+      await onTradStarted;
+      await vi.advanceTimersByTimeAsync(13000);
+      const res = await promise;
+      const data = (await res.json()) as SearchResponse;
+      expect(data.failures).toEqual([]);
+      expect(data.list).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -1,5 +1,5 @@
 {
-  "name": "LibreTV 精選片源（影視 / 動漫 / 短劇 / 直播 IPTV / 18+）",
+  "name": "LibreTV 精選片源（影視 / 動漫 / 體育 / 短劇 / 直播 IPTV / 18+）",
   "version": 2,
   "sources": [
     {
@@ -102,6 +102,75 @@
     {
       "name": "櫻花動漫",
       "url": "https://m3u8.apiyhzy.com/api.php/provide/vod",
+      "isAdult": false
+    },
+    {
+      "name": "櫻花資源 (主站動漫)",
+      "url": "https://yhzy.cc/api.php/provide/vod",
+      "isAdult": false
+    },
+    {
+      "name": "愛奇藝資源 (國漫/陸劇)",
+      "url": "https://iqiyizyapi.com/api.php/provide/vod",
+      "isAdult": false
+    },
+    {
+      "name": "貓眼資源",
+      "url": "https://api.maoyanapi.top/api.php/provide/vod",
+      "detail": "https://maoyanapi.top",
+      "isAdult": false
+    },
+    {
+      "name": "天涯影視",
+      "url": "https://tyyszy.com/api.php/provide/vod",
+      "detail": "https://tyyszy.com",
+      "isAdult": false
+    },
+    {
+      "name": "山海資源",
+      "url": "https://zy.sh0o.cn/api.php/provide/vod",
+      "detail": "https://sh0o.cn",
+      "isAdult": false
+    },
+    {
+      "name": "閃電資源",
+      "url": "https://xsd.sdzyapi.com/api.php/provide/vod",
+      "detail": "https://sdzyapi.com",
+      "isAdult": false
+    },
+    {
+      "name": "優質資源庫 (1080)",
+      "url": "https://api.1080zyku.com/inc/api.php/provide/vod",
+      "detail": "https://1080zyku.com",
+      "isAdult": false
+    },
+    {
+      "name": "無限資源",
+      "url": "https://api.wuxianzy.net/api.php/provide/vod",
+      "detail": "https://wuxianzy.net",
+      "isAdult": false
+    },
+    {
+      "name": "蜂巢片庫",
+      "url": "https://api.fczy888.me/api.php/provide/vod",
+      "detail": "https://fczy888.me",
+      "isAdult": false
+    },
+    {
+      "name": "艾旦影視",
+      "url": "https://lovedan.net/api.php/provide/vod",
+      "detail": "https://lovedan.net",
+      "isAdult": false
+    },
+    {
+      "name": "淘片資源",
+      "url": "https://taopianapi.com/cjapi/mc/vod/json.html",
+      "isAdult": false
+    },
+    {
+      "name": "旺旺影視資源",
+      "url": "https://api.wwzy.tv/api.php/provide/vod",
+      "detail": "https://wwzy.tv",
       "isAdult": false
     },
     {
@@ -361,8 +430,64 @@
       "url": "https://iptv-org.github.io/iptv/countries/kr.m3u"
     },
     {
+      "name": "全球動畫頻道 (iptv-org Animation)",
+      "url": "https://iptv-org.github.io/iptv/categories/animation.m3u"
+    },
+    {
+      "name": "全球少兒卡通 (iptv-org Kids)",
+      "url": "https://iptv-org.github.io/iptv/categories/kids.m3u"
+    },
+    {
+      "name": "華語動漫少兒／央視衛視精選 (myIPTV 含節目表)",
+      "url": "https://raw.githubusercontent.com/suxuang/myIPTV/main/ipv4.m3u",
+      "epg": "https://live.fanmingming.cn/e.xml"
+    },
+    {
+      "name": "茶客華語直播 (含台灣／少兒／動漫 含節目表)",
+      "url": "https://raw.githubusercontent.com/vamoschuck/TV/main/M3U",
+      "epg": "https://raw.githubusercontent.com/litiande03/epg/master/pl.xml.gz"
+    },
+    {
+      "name": "全球華語電視精選 (FanMingMing 含節目表)",
+      "url": "https://live.fanmingming.cn/tv/m3u/global.m3u",
+      "epg": "https://live.fanmingming.cn/e.xml"
+    },
+    {
       "name": "國際體育賽事 (iptv-org)",
       "url": "https://iptv-org.github.io/iptv/categories/sports.m3u"
+    },
+    {
+      "name": "全球體育賽事精選 (FreeCaTV 足球/籃球/F1/UFC)",
+      "url": "https://raw.githubusercontent.com/manikiptv/freecatv.github.io/main/freecatv.m3u8"
+    },
+    {
+      "name": "Pluto TV 全球免費頻道 (NBA/歐冠/NFL/動漫)",
+      "url": "https://raw.githubusercontent.com/BuddyChewChew/app-m3u-generator/main/playlists/plutotv_all.m3u"
+    },
+    {
+      "name": "Samsung TV Plus 全球免費頻道 (FIFA+/DAZN/F1/網球)",
+      "url": "https://raw.githubusercontent.com/BuddyChewChew/app-m3u-generator/main/playlists/samsungtvplus_all.m3u"
+    },
+    {
+      "name": "Plex Live TV 全球免費頻道 (體育/動漫/電影)",
+      "url": "https://raw.githubusercontent.com/BuddyChewChew/app-m3u-generator/main/playlists/plex_all.m3u"
+    },
+    {
+      "name": "Free-TV 全球免費主流台 (含各國體育賽事)",
+      "url": "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8"
+    },
+    {
+      "name": "賽車與汽機車賽事 (iptv-org Auto)",
+      "url": "https://iptv-org.github.io/iptv/categories/auto.m3u"
+    },
+    {
+      "name": "戶外與極限運動 (iptv-org Outdoor)",
+      "url": "https://iptv-org.github.io/iptv/categories/outdoor.m3u"
+    },
+    {
+      "name": "iptv-org 在線實測全球總表 (含體育/EPG)",
+      "url": "https://dearbulut.github.io/iptv/playlists/online.m3u",
+      "epg": "https://dearbulut.github.io/iptv/epg/guide.xml.gz"
     }
   ]
 }

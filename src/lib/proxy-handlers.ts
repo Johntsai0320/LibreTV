@@ -179,6 +179,25 @@ export async function handleProxyRequest(req: Request, targetUrl: string): Promi
  * - 每一跳都强制 SSRF 校验（不信任解析阶段的校验结果）；
  * - 部署者可设 LIVE_ALLOW_PRIVATE=1 显式放行内网自建源（默认拒绝）。
  */
+function sanitizeHeaderUrl(raw: string | null): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.replace(/[\r\n\0]+/g, '').trim();
+  if (!trimmed) return undefined;
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return undefined;
+    return u.href;
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizeHeaderUa(raw: string | null): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.replace(/[\r\n\0]+/g, ' ').trim();
+  return trimmed ? trimmed.slice(0, 512) : undefined;
+}
+
 export async function handleLiveStreamRequest(req: Request, targetUrl: string): Promise<Response> {
   const guarded = guardRequest(req);
   if (guarded) return guarded;
@@ -186,12 +205,23 @@ export async function handleLiveStreamRequest(req: Request, targetUrl: string): 
   const verdict = await checkLiveUrlAllowed(targetUrl);
   if (!verdict.ok) return jsonError(verdict.reason, 403);
 
+  const reqSearchParams = (() => {
+    try {
+      return new URL(req.url).searchParams;
+    } catch {
+      return null;
+    }
+  })();
+  const refHeader = sanitizeHeaderUrl(reqSearchParams?.get('ref') ?? null);
+  const uaHeader = sanitizeHeaderUa(reqSearchParams?.get('ua') ?? null);
+
   const controller = new AbortController();
   // 客户端断开（切台/关页）时终止上游连接，防止连接泄漏
   const onClientAbort = () => controller.abort();
   req.signal.addEventListener('abort', onClientAbort, { once: true });
 
-  const headers: Record<string, string> = { 'User-Agent': UA, Accept: '*/*' };
+  const headers: Record<string, string> = { 'User-Agent': uaHeader || UA, Accept: '*/*' };
+  if (refHeader) headers.Referer = refHeader;
 
   let response: Response;
   let finalUrl: string;
@@ -225,11 +255,17 @@ export async function handleLiveStreamRequest(req: Request, targetUrl: string): 
   }
 
   const contentType = response.headers.get('content-type') || '';
+  const targetPath = targetUrl.toLowerCase().split('?')[0];
+  const finalPath = finalUrl.toLowerCase().split('?')[0];
   const isM3u8 =
-    contentType.includes('mpegurl') || contentType.includes('x-mpegurl') ||
-    targetUrl.toLowerCase().split('?')[0].endsWith('.m3u8');
+    contentType.includes('mpegurl') ||
+    contentType.includes('x-mpegurl') ||
+    targetPath.endsWith('.m3u8') ||
+    finalPath.endsWith('.m3u8') ||
+    /format=m3u8/i.test(targetUrl) ||
+    /format=m3u8/i.test(finalUrl);
 
-  // HLS manifest：重写变体/分片地址指向本路由，保证后续请求同源同鉴权。
+  // HLS manifest：重写变体/分片地址指向本路由，保证后续请求同源同鉴权并延续 ref/ua。
   // 关键：以重定向后的最终 URL 为 base 解析相对地址（gslb 调度源 302 后路径会变）
   if (isM3u8) {
     let text: string;
@@ -241,7 +277,10 @@ export async function handleLiveStreamRequest(req: Request, targetUrl: string): 
         err instanceof PayloadTooLargeError ? 413 : 502
       );
     }
-    return new NextResponse(rewriteM3u8(text, finalUrl, 0, LIVE_STREAM_BASE), {
+    const headerSuffix =
+      (refHeader ? `&ref=${encodeURIComponent(refHeader)}` : '') +
+      (uaHeader ? `&ua=${encodeURIComponent(uaHeader)}` : '');
+    return new NextResponse(rewriteM3u8(text, finalUrl, 0, LIVE_STREAM_BASE, headerSuffix), {
       status: response.status,
       headers: {
         'Content-Type': 'application/vnd.apple.mpegurl',

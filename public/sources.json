@@ -371,27 +371,17 @@
   ],
   "liveSources": [
     {
-      "name": "台灣精選直播 (ChiSheng9 含節目表)",
+      "name": "台灣精選直播 (ChiSheng9 YouTube 官方台 含節目表)",
       "url": "https://raw.githubusercontent.com/ChiSheng9/iptv/master/playlist.m3u",
       "epg": "https://raw.githubusercontent.com/litiande03/epg/master/pl.xml.gz"
     },
     {
-      "name": "台灣四季線上 4GTV (含節目表)",
-      "url": "https://raw.githubusercontent.com/judy-gotv/iptv/main/4gtv.m3u",
+      "name": "台灣主流電視頻道 (Free-TV 含節目表)",
+      "url": "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlists/playlist_taiwan.m3u8",
       "epg": "https://raw.githubusercontent.com/litiande03/epg/master/pl.xml.gz"
     },
     {
-      "name": "台灣 LiTV 電視頻道 (含節目表)",
-      "url": "https://raw.githubusercontent.com/judy-gotv/iptv/main/litv.m3u",
-      "epg": "https://raw.githubusercontent.com/litiande03/epg/master/pl.xml.gz"
-    },
-    {
-      "name": "台灣 Ofiii 歐飛電視頻道 (含節目表)",
-      "url": "https://raw.githubusercontent.com/judy-gotv/iptv/main/ofiii.m3u",
-      "epg": "https://raw.githubusercontent.com/litiande03/epg/master/pl.xml.gz"
-    },
-    {
-      "name": "台灣電視頻道 (iptv-org)",
+      "name": "台灣電視頻道 (iptv-org 含節目表)",
       "url": "https://iptv-org.github.io/iptv/countries/tw.m3u",
       "epg": "https://raw.githubusercontent.com/litiande03/epg/master/pl.xml.gz"
     },
@@ -426,6 +416,10 @@
       "url": "https://iptv-org.github.io/iptv/countries/jp.m3u"
     },
     {
+      "name": "日本主流電視頻道 (Free-TV)",
+      "url": "https://raw.githubusercontent.com/Free-TV/IPTV/master/playlists/playlist_japan.m3u8"
+    },
+    {
       "name": "韓國電視頻道 (iptv-org)",
       "url": "https://iptv-org.github.io/iptv/countries/kr.m3u"
     },
@@ -446,11 +440,6 @@
       "name": "茶客華語直播 (含台灣／少兒／動漫 含節目表)",
       "url": "https://raw.githubusercontent.com/vamoschuck/TV/main/M3U",
       "epg": "https://raw.githubusercontent.com/litiande03/epg/master/pl.xml.gz"
-    },
-    {
-      "name": "全球華語電視精選 (FanMingMing 含節目表)",
-      "url": "https://live.fanmingming.cn/tv/m3u/global.m3u",
-      "epg": "https://live.fanmingming.cn/e.xml"
     },
     {
       "name": "國際體育賽事 (iptv-org)",

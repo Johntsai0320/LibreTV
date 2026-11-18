@@ -126,6 +126,9 @@ export interface LiveRecentEntry {
   epg?: string;
   /** 所属直播源地址（M3U 订阅 URL），删除订阅时按此清理；旧数据缺失则自然淘汰 */
   sourceUrl?: string;
+  /** 可選 HTTP Referer / User-Agent（如日本頻道防盜鏈） */
+  referrer?: string;
+  userAgent?: string;
   timestamp: number;
 }
 

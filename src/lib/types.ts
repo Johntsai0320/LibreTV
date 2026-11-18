@@ -165,6 +165,10 @@ export interface LiveChannel {
   tvgId?: string;
   /** M3U 的 tvg-name 属性（原始台名） */
   rawName?: string;
+  /** 來源清單宣告的 Referer（如 #EXTVLCOPT:http-referrer / http-referrer="..."） */
+  referrer?: string;
+  /** 來源清單宣告的 User-Agent（如 #EXTVLCOPT:http-user-agent / http-user-agent="..."） */
+  userAgent?: string;
 }
 
 export interface LivePlaylistResponse {

@@ -80,7 +80,7 @@ function LiveContent() {
 
   const { channels, groups, failedCount } = useMemo(() => {
     const list: LiveChannelItem[] = [];
-    const seen = new Set<string>();
+    const seen = new Map<string, number>();
     let failed = 0;
     for (const { source, result } of playlistsQuery.data ?? []) {
       if (result.status !== 'fulfilled') {
@@ -88,8 +88,15 @@ function LiveContent() {
         continue;
       }
       for (const c of result.value.channels) {
-        if (seen.has(c.url)) continue;
-        seen.add(c.url);
+        const existingIdx = seen.get(c.url);
+        if (existingIdx !== undefined) {
+          // 若同 URL 在後續播放清單才帶有防盜鏈 Referer/UA，補齊以免錯失請求頭
+          const existing = list[existingIdx];
+          if (!existing.referrer && c.referrer) existing.referrer = c.referrer;
+          if (!existing.userAgent && c.userAgent) existing.userAgent = c.userAgent;
+          continue;
+        }
+        seen.set(c.url, list.length);
         list.push({ ...c, epg: source.epg, sourceUrl: source.url });
       }
     }
@@ -112,6 +119,8 @@ function LiveContent() {
       group: searchParams.get('group') || undefined,
       tvgId: searchParams.get('tvgId') || undefined,
       epg: searchParams.get('epg') || undefined,
+      referrer: searchParams.get('ref') || undefined,
+      userAgent: searchParams.get('ua') || undefined,
     } as LiveChannelItem;
   }, [channels, currentUrl, searchParams]);
 
@@ -130,6 +139,8 @@ function LiveContent() {
       if (c.group) sp.set('group', c.group);
       if (c.tvgId) sp.set('tvgId', c.tvgId);
       if (c.epg) sp.set('epg', c.epg);
+      if (c.referrer) sp.set('ref', c.referrer);
+      if (c.userAgent) sp.set('ua', c.userAgent);
       router.replace(`/live?${sp.toString()}`, { scroll: false });
       useAppStore.getState().addLiveRecent({
         url: c.url,
@@ -139,6 +150,8 @@ function LiveContent() {
         tvgId: c.tvgId,
         epg: c.epg,
         sourceUrl: c.sourceUrl,
+        referrer: c.referrer,
+        userAgent: c.userAgent,
       });
     },
     [router]
@@ -230,6 +243,8 @@ function LiveContent() {
                 <LivePlayer
                   url={currentUrl}
                   title={currentChannel?.name || '直播'}
+                  referrer={currentChannel?.referrer}
+                  userAgent={currentChannel?.userAgent}
                   onPrevChannel={goPrevChannel}
                   onNextChannel={goNextChannel}
                   volumeBoost={volumeBoost}

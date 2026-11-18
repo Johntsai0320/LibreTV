@@ -120,4 +120,42 @@ https://s.example.com/ok.m3u8`;
     expect(parseM3u('随便一段文本\n没有地址')).toEqual([]);
     expect(parseM3u('#EXTINF:-1,孤儿频道')).toEqual([]);
   });
+
+  it('解析 #EXTVLCOPT 與 #EXTINF 中的 http-referrer / http-user-agent', () => {
+    const m3u = `#EXTM3U
+#EXTINF:-1 tvg-id="fuji" group-title="日本",Fuji TV
+#EXTVLCOPT:http-referrer=https://mov3.co/
+#EXTVLCOPT:http-user-agent=CustomPlayer/1.0
+https://fujitv4.mov3.co/hls/fujitv.m3u8
+#EXTINF:-1 http-referrer="https://example.org/watch" http-user-agent="MyUA/2.0",Test Ch
+https://cdn.example.org/live.m3u8`;
+    const channels = parseM3u(m3u);
+    expect(channels).toHaveLength(2);
+    expect(channels[0]).toMatchObject({
+      name: 'Fuji TV',
+      referrer: 'https://mov3.co/',
+      userAgent: 'CustomPlayer/1.0',
+    });
+    expect(channels[1]).toMatchObject({
+      name: 'Test Ch',
+      referrer: 'https://example.org/watch',
+      userAgent: 'MyUA/2.0',
+    });
+  });
+
+  it('帶有 baseUrl 時過濾 [NO PUBLIC STREAM] 佔位行與無效空 YouTube 網址', () => {
+    const m3u = `#EXTM3U
+#EXTINF:-1,WOWOW
+[NO PUBLIC STREAM]
+#EXTINF:-1,THE K-POP
+https://www.youtube.com/watch?v=
+#EXTINF:-1,有效台
+https://www.youtube.com/watch?v=dZp87qnWelE`;
+    const channels = parseM3u(
+      m3u,
+      'https://raw.githubusercontent.com/Free-TV/IPTV/master/playlists/playlist_japan.m3u8'
+    );
+    expect(channels).toHaveLength(1);
+    expect(channels[0].name).toBe('有效台');
+  });
 });

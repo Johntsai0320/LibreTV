@@ -2,13 +2,14 @@ import { NextResponse } from 'next/server';
 import { guardRequest, jsonError } from '@/lib/api-guard';
 import { fetchUpstreamWithMeta } from '@/lib/fetch-utils';
 import { withHostLimit } from '@/lib/host-gate';
+import { parseYouTubeLiveTarget } from '@/lib/youtube';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 /**
  * 直播频道批量测活（分片级）。
- * POST /api/live/probe  body: { urls: string[] }
+ * POST /api/live/probe  body: { urls: string[], headers?: Record<string, { referrer?: string; userAgent?: string }> }
  *
  * 单级「manifest 可访问」不足以判断可播：大量 IPTV 源 manifest 正常但
  * 分片请求被拒（token/Referer 校验、源瞬断）。因此探测追到真实分片：
@@ -17,7 +18,8 @@ export const dynamic = 'force-dynamic';
  *   分片以 Range: bytes=0-1 请求，收到响应头即 cancel body，不下载媒体数据。
  *   manifest 请求**不带 Range**（部分源会严格按 Range 截断，只回 2 字节）。
  *
- * 非 m3u8（FLV 等）维持单级探测。结果 level 标识探测深度：
+ * 非 m3u8（FLV 等）维持单级探测；YouTube 直播页改用 oEmbed / 频道页可达性探测。
+ * 结果 level 标识探测深度：
  *   segment=分片级（最可信）/ manifest=仅 manifest 级 / head=单级直探
  * 200/206 响应头视为可达；仍不保证编码可解码（H.265 等）。
  *
@@ -26,7 +28,7 @@ export const dynamic = 'force-dynamic';
  * - 结果带短 TTL 缓存（成功 30min / 失败 2min），多用户重复测活不再重复打上游；
  * - 全局按 host 限并发（单 host 在途 ≤3）：同一运营商的频道常共用 host，
  *   批量测活不限流会以 16×N 的并发冲击同一弱源，被打挂甚至封服务器 IP（越测越红）；
- * - 请求带源站 Referer，消除「源校验 Referer 导致的可播却测不通」假阴性；
+ * - 请求带频道自帶或源站 Referer/User-Agent，消除「源校验防盜鏈导致的可播却测不通」假阴性；
  * - 校验 m3u8 的 #EXTM3U 前缀与直链的 content-type，剔除 200 的 HTML/JSON 错误页；
  * - master playlist 解析 CODECS 一并返回，前端据此提示 H.265 等浏览器无法解码的情况；
  * - 分片级通过后额外采样 128KB 实际吞吐（kbps），识别「可达但限速」的源；
@@ -67,6 +69,11 @@ const CACHE_MAX_ENTRIES = 20_000;
 const UA =
   process.env.USER_AGENT ||
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+
+interface ProbeHeaderSpec {
+  referrer?: string;
+  userAgent?: string;
+}
 
 interface ProbeOutcome {
   url: string;
@@ -122,6 +129,37 @@ function refererOf(url: string): string | undefined {
   }
 }
 
+function sanitizeHeaderUrl(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.replace(/[\r\n\0]+/g, '').trim();
+  if (!trimmed) return undefined;
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return undefined;
+    return u.href;
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizeHeaderUa(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.replace(/[\r\n\0]+/g, ' ').trim();
+  return trimmed ? trimmed.slice(0, 512) : undefined;
+}
+
+function isM3u8Manifest(url: string, finalUrl: string, contentType: string): boolean {
+  const ct = contentType.toLowerCase();
+  return (
+    ct.includes('mpegurl') ||
+    ct.includes('x-mpegurl') ||
+    url.toLowerCase().split('?')[0].endsWith('.m3u8') ||
+    finalUrl.toLowerCase().split('?')[0].endsWith('.m3u8') ||
+    /format=m3u8/i.test(url) ||
+    /format=m3u8/i.test(finalUrl)
+  );
+}
+
 /**
  * 请求一个资源，拿到响应头即断开 body（m3u8 额外读取文本以供解析）。
  *
@@ -133,10 +171,11 @@ async function fetchHeadersOnly(
   url: string,
   timeoutMs: number,
   referer?: string,
-  range = false
+  range = false,
+  userAgent?: string
 ): Promise<FetchHeadResult> {
   const headers: Record<string, string> = {
-    'User-Agent': UA,
+    'User-Agent': userAgent || UA,
     Accept: '*/*',
   };
   if (range) headers.Range = 'bytes=0-1';
@@ -151,9 +190,7 @@ async function fetchHeadersOnly(
     allowPrivate: true,
   });
   const contentType = res.headers.get('content-type') || '';
-  const isM3u8 =
-    contentType.includes('mpegurl') || contentType.includes('x-mpegurl') ||
-    url.toLowerCase().split('?')[0].endsWith('.m3u8');
+  const isM3u8 = isM3u8Manifest(url, finalUrl, contentType);
 
   let text: string | undefined;
   if (isM3u8) {
@@ -222,14 +259,18 @@ function elapsed(start: number): number {
  * 与分片可达性检查是两次独立请求（前者只取响应头即 cancel）。
  * 服务器忽略 Range 时按整段返回，读到 THROUGHPUT_BYTES 即停，不影响估算。
  */
-async function measureThroughput(segmentUrl: string, referer?: string): Promise<number | undefined> {
+async function measureThroughput(
+  segmentUrl: string,
+  referer?: string,
+  userAgent?: string
+): Promise<number | undefined> {
   const start = performance.now();
   try {
     const { res } = await fetchUpstreamWithMeta(segmentUrl, {
       timeoutMs: 3000,
       retries: 0,
       headers: {
-        'User-Agent': UA,
+        'User-Agent': userAgent || UA,
         Accept: '*/*',
         Range: `bytes=0-${THROUGHPUT_BYTES - 1}`,
         ...(referer ? { Referer: referer } : {}),
@@ -260,18 +301,62 @@ async function measureThroughput(segmentUrl: string, referer?: string): Promise<
   }
 }
 
+/** 探测 YouTube 直播地址：video 走官方 oEmbed 接口验证可嵌入性，channel/handle 探测页面可达性 */
+async function probeYouTube(
+  url: string,
+  start: number,
+  timeout: () => number
+): Promise<ProbeOutcome | null> {
+  const yt = parseYouTubeLiveTarget(url);
+  if (!yt) return null;
+  if (yt.kind === 'invalid') {
+    return { url, ok: false, ms: elapsed(start), error: '无效的 YouTube 直播地址' };
+  }
+  const checkUrl =
+    yt.kind === 'video'
+      ? `https://www.youtube.com/oembed?url=${encodeURIComponent(yt.watchUrl)}&format=json`
+      : yt.watchUrl;
+  const { res } = await fetchUpstreamWithMeta(checkUrl, {
+    timeoutMs: timeout(),
+    retries: 0,
+    headers: {
+      'User-Agent': UA,
+      Accept: yt.kind === 'video' ? 'application/json' : 'text/html',
+    },
+    allowPrivate: true,
+  });
+  if (res.body) {
+    try { await res.body.cancel(); } catch { /* 忽略 */ }
+  }
+  if (res.ok) {
+    return { url, ok: true, status: res.status, ms: elapsed(start), level: 'head' };
+  }
+  if (yt.kind === 'video' && (res.status === 401 || res.status === 403)) {
+    return { url, ok: false, status: res.status, ms: elapsed(start), error: 'YouTube 直播禁止嵌入播放' };
+  }
+  return { url, ok: false, status: res.status, ms: elapsed(start), error: `YouTube 频道不可用 (${res.status})` };
+}
+
 /** 两级探测：manifest →（master 时穿透 variant）→ 分片 */
-async function probeOne(url: string): Promise<ProbeOutcome> {
+async function probeOne(url: string, headerSpec?: ProbeHeaderSpec): Promise<ProbeOutcome> {
   const start = performance.now();
   const deadline = start + URL_BUDGET_MS;
   const remaining = () => deadline - performance.now();
 
-  const referer = refererOf(url);
+  const referer = headerSpec?.referrer || refererOf(url);
+  const userAgent = headerSpec?.userAgent;
   const timeout = () => Math.min(LEVEL_TIMEOUT_MS, Math.max(500, Math.round(remaining())));
 
   try {
+    const ytOutcome = await probeYouTube(url, start, timeout);
+    if (ytOutcome) return ytOutcome;
+
+    if (/\.mpd(\?|$)|format=mpd/i.test(url)) {
+      return { url, ok: false, ms: elapsed(start), error: '暂不支持 MPEG-DASH (.mpd) 流' };
+    }
+
     // 第一级：入口地址
-    const entry = await fetchHeadersOnly(url, timeout(), referer);
+    const entry = await fetchHeadersOnly(url, timeout(), referer, false, userAgent);
     if (!entry.ok) {
       return { url, ok: false, status: entry.status, ms: elapsed(start), error: `入口响应 ${entry.status}` };
     }
@@ -323,7 +408,7 @@ async function probeOne(url: string): Promise<ProbeOutcome> {
       return { url, ok: false, ms: elapsed(start), error: 'playlist 中没有可用的流地址' };
     }
     if (variant !== null) {
-      const variantRes = await fetchHeadersOnly(variant, timeout(), referer);
+      const variantRes = await fetchHeadersOnly(variant, timeout(), referer, false, userAgent);
       const variantText = (variantRes.text || '').replace(/^\uFEFF/, '').trimStart();
       if (!variantRes.ok || !HEADER_OK.test(variantText)) {
         return {
@@ -350,7 +435,8 @@ async function probeOne(url: string): Promise<ProbeOutcome> {
       segmentUrl,
       Math.min(timeout(), SEGMENT_TIMEOUT_MS),
       referer,
-      true
+      true,
+      userAgent
     );
     // ms 只统计分片往返：三级累计耗时当作「延迟」对用户没有参考意义
     const segmentMs = elapsed(segmentStart);
@@ -368,7 +454,7 @@ async function probeOne(url: string): Promise<ProbeOutcome> {
     // 分片可达：采样实际吞吐，识别「可达但限速」的源（绿点却播不了的主因）
     const kbps =
       remaining() > THROUGHPUT_MIN_REMAINING_MS
-        ? await measureThroughput(segmentUrl, referer)
+        ? await measureThroughput(segmentUrl, referer, userAgent)
         : undefined;
     return {
       url,
@@ -398,17 +484,27 @@ const NDJSON_HEADERS = {
   'X-Accel-Buffering': 'no',
 };
 
+function cacheKeyOf(url: string, spec?: ProbeHeaderSpec): string {
+  if (!spec?.referrer && !spec?.userAgent) return url;
+  return `${url}\n${spec.referrer || ''}\n${spec.userAgent || ''}`;
+}
+
 /**
  * 流式测活：命中缓存的结果立即推送，其余探测完成一条推一条（NDJSON）。
  * 相比整批等待最慢的一条，前端状态点可以边测边亮。
  * 客户端断开（切筛选/关页）时 req.signal 触发，worker 停止且不再写入。
  */
-function ndjsonResponse(urls: string[], reqSignal: AbortSignal): Response {
+function ndjsonResponse(
+  urls: string[],
+  reqSignal: AbortSignal,
+  headerMap: Map<string, ProbeHeaderSpec>
+): Response {
   const encoder = new TextEncoder();
   const cachedOutcomes: ProbeOutcome[] = [];
   const pending: string[] = [];
   for (const u of urls) {
-    const hit = cacheGet(u);
+    const key = cacheKeyOf(u, headerMap.get(u));
+    const hit = cacheGet(key);
     if (hit) cachedOutcomes.push(hit);
     else pending.push(u);
   }
@@ -438,9 +534,10 @@ function ndjsonResponse(urls: string[], reqSignal: AbortSignal): Response {
         while (cursor < pending.length) {
           if (closed || reqSignal.aborted) return;
           const url = pending[cursor++];
-          const outcome = await withHostLimit(url, () => probeOne(url));
+          const spec = headerMap.get(url);
+          const outcome = await withHostLimit(url, () => probeOne(url, spec));
           if (closed || reqSignal.aborted) return;
-          cacheSet(url, outcome);
+          cacheSet(cacheKeyOf(url, spec), outcome);
           send(outcome);
         }
       };
@@ -460,17 +557,17 @@ function ndjsonResponse(urls: string[], reqSignal: AbortSignal): Response {
 /** 结果短 TTL 缓存：成功 30min、失败 2min（TTL 见上方 CACHE_TTL_*_MS），避免多用户重复测活打爆上游 */
 const probeCache = new Map<string, { outcome: ProbeOutcome; expiresAt: number }>();
 
-function cacheGet(url: string): ProbeOutcome | undefined {
-  const entry = probeCache.get(url);
+function cacheGet(key: string): ProbeOutcome | undefined {
+  const entry = probeCache.get(key);
   if (!entry) return undefined;
   if (Date.now() > entry.expiresAt) {
-    probeCache.delete(url);
+    probeCache.delete(key);
     return undefined;
   }
   return entry.outcome;
 }
 
-function cacheSet(url: string, outcome: ProbeOutcome): void {
+function cacheSet(key: string, outcome: ProbeOutcome): void {
   if (probeCache.size >= CACHE_MAX_ENTRIES) {
     const now = Date.now();
     for (const [k, v] of probeCache) {
@@ -481,19 +578,34 @@ function cacheSet(url: string, outcome: ProbeOutcome): void {
       if (oldest !== undefined) probeCache.delete(oldest);
     }
   }
-  probeCache.set(url, {
+  probeCache.set(key, {
     outcome,
     expiresAt: Date.now() + (outcome.ok ? CACHE_TTL_OK_MS : CACHE_TTL_FAIL_MS),
   });
+}
+
+function parseHeaderMap(rawHeaders: unknown): Map<string, ProbeHeaderSpec> {
+  const map = new Map<string, ProbeHeaderSpec>();
+  if (!rawHeaders || typeof rawHeaders !== 'object' || Array.isArray(rawHeaders)) return map;
+  for (const [url, specRaw] of Object.entries(rawHeaders as Record<string, unknown>)) {
+    if (!specRaw || typeof specRaw !== 'object' || Array.isArray(specRaw)) continue;
+    const obj = specRaw as Record<string, unknown>;
+    const referrer = sanitizeHeaderUrl(obj.referrer);
+    const userAgent = sanitizeHeaderUa(obj.userAgent);
+    if (referrer || userAgent) {
+      map.set(url, { ...(referrer ? { referrer } : {}), ...(userAgent ? { userAgent } : {}) });
+    }
+  }
+  return map;
 }
 
 export async function POST(req: Request) {
   const guarded = guardRequest(req);
   if (guarded) return guarded;
 
-  let body: { urls?: unknown };
+  let body: { urls?: unknown; headers?: unknown };
   try {
-    body = (await req.json()) as { urls?: unknown };
+    body = (await req.json()) as { urls?: unknown; headers?: unknown };
   } catch {
     return jsonError('无效请求体', 400);
   }
@@ -502,6 +614,7 @@ export async function POST(req: Request) {
   const urls = [...new Set(
     body.urls.filter((u): u is string => typeof u === 'string' && /^https?:\/\//.test(u))
   )].slice(0, MAX_URLS);
+  const headerMap = parseHeaderMap(body.headers);
   const stream = new URL(req.url).searchParams.get('stream') === '1';
   if (urls.length === 0) {
     return stream
@@ -509,13 +622,13 @@ export async function POST(req: Request) {
       : NextResponse.json({ results: [] });
   }
 
-  if (stream) return ndjsonResponse(urls, req.signal);
+  if (stream) return ndjsonResponse(urls, req.signal, headerMap);
 
   const outcomes = new Map<string, ProbeOutcome>();
   // 先命中缓存，减少需要真实探测的目标
   const pending: string[] = [];
   for (const u of urls) {
-    const hit = cacheGet(u);
+    const hit = cacheGet(cacheKeyOf(u, headerMap.get(u)));
     if (hit) outcomes.set(u, hit);
     else pending.push(u);
   }
@@ -525,8 +638,9 @@ export async function POST(req: Request) {
   const worker = async () => {
     while (cursor < pending.length) {
       const url = pending[cursor++];
-      const outcome = await withHostLimit(url, () => probeOne(url));
-      cacheSet(url, outcome);
+      const spec = headerMap.get(url);
+      const outcome = await withHostLimit(url, () => probeOne(url, spec));
+      cacheSet(cacheKeyOf(url, spec), outcome);
       outcomes.set(url, outcome);
     }
   };

@@ -8,6 +8,8 @@ import {
   findCrossedEnding,
   migrateSkipMarks,
   nudgeSegment,
+  normalizeDefaultOpeningSeconds,
+  resolveEffectiveSegments,
   resolveSegment,
   resolveSegments,
   skipMarkKey,
@@ -417,3 +419,45 @@ describe('validateSegment 的片尾长度', () => {
     expect(validateSegment({ type: 'middle', start: 1490, end: 1524 }, 1560, existing)).toBeNull();
   });
 });
+
+describe('全局默认跳过开头秒数与有效片段解析', () => {
+  it('normalizeDefaultOpeningSeconds 对边界与非法值做规范化', () => {
+    expect(normalizeDefaultOpeningSeconds(0)).toBe(0);
+    expect(normalizeDefaultOpeningSeconds(-10)).toBe(0);
+    expect(normalizeDefaultOpeningSeconds(2)).toBe(0); // 小于 MIN_SEGMENT_SECONDS (3)
+    expect(normalizeDefaultOpeningSeconds(Number.NaN)).toBe(0);
+    expect(normalizeDefaultOpeningSeconds(15.6)).toBe(16);
+    expect(normalizeDefaultOpeningSeconds(999)).toBe(600);
+  });
+
+  it('无单剧片头标记时注入全局默认跳过开头，长视频生效', () => {
+    const segments = resolveEffectiveSegments(undefined, 1500, 30);
+    expect(segments).toEqual([{ type: 'opening', start: 0, end: 30 }]);
+  });
+
+  it('单剧已关闭（enabled: false）或已有片头标记时全局默认不覆盖', () => {
+    const disabled: SkipMark = { segments: [], enabled: false, updatedAt: 0 };
+    expect(resolveEffectiveSegments(disabled, 1500, 30)).toEqual([]);
+
+    const customOpening = mark({ type: 'opening', start: 0, end: 85 });
+    expect(resolveEffectiveSegments(customOpening, 1500, 30)).toEqual([
+      { type: 'opening', start: 0, end: 85 },
+    ]);
+  });
+
+  it('短视频保护：时长不足 60s 或不足默认秒数 2 倍时不自动注入', () => {
+    expect(resolveEffectiveSegments(undefined, 45, 15)).toEqual([]);
+    expect(resolveEffectiveSegments(undefined, 100, 60)).toEqual([]); // 100 < 60 * 2
+    expect(resolveEffectiveSegments(undefined, 120, 60)).toEqual([
+      { type: 'opening', start: 0, end: 60 },
+    ]);
+  });
+
+  it('间隔冲突保护：若已有中段/片尾过近则跳过注入', () => {
+    const nearMiddle = mark({ type: 'middle', start: 32, end: 60 });
+    expect(resolveEffectiveSegments(nearMiddle, 1500, 30)).toEqual([
+      { type: 'middle', start: 32, end: 60 },
+    ]);
+  });
+});
+

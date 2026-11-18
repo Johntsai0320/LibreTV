@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildImageCandidates, buildImageUrl } from './utils';
+import { buildImageCandidates, buildImageUrl, formatDuration, parseVodDuration } from './utils';
 
 describe('buildImageUrl', () => {
   it('proxy 模式走查询串形式（路径形式会被 EdgeOne 等网关归一化破坏）', () => {
@@ -61,5 +61,37 @@ describe('buildImageCandidates', () => {
   it('custom 模式为单一候选（模板错误显式暴露，不静默回退）', () => {
     expect(buildImageCandidates(DOUBAN, 'custom', 'https://p.example.com/?u=')).toHaveLength(1);
     expect(buildImageCandidates(undefined, 'direct', '')).toEqual([]);
+  });
+});
+
+describe('formatDuration', () => {
+  it('按 mm:ss / h:mm:ss 格式化并忽略非法或不足 1 秒的值', () => {
+    expect(formatDuration(undefined)).toBeUndefined();
+    expect(formatDuration(0)).toBeUndefined();
+    expect(formatDuration(0.4)).toBeUndefined();
+    expect(formatDuration(Number.NaN)).toBeUndefined();
+    expect(formatDuration(90.4)).toBe('01:30');
+    expect(formatDuration(5420)).toBe('1:30:20');
+  });
+});
+
+describe('parseVodDuration', () => {
+  it('兼容 HH:MM:SS、MM:SS、带单位中文/英文及裸数字', () => {
+    expect(parseVodDuration('01:35:20')).toBe(5720);
+    expect(parseVodDuration('45:12')).toBe(2712);
+    expect(parseVodDuration('95分钟')).toBe(5700);
+    expect(parseVodDuration('1小时30分')).toBe(5400);
+    expect(parseVodDuration('1h 30m 5s')).toBe(5405);
+    expect(parseVodDuration('5400')).toBe(5400);
+    expect(parseVodDuration('120')).toBe(7200);
+    expect(parseVodDuration(3600)).toBe(3600);
+  });
+
+  it('过滤空值、零与越界时长', () => {
+    expect(parseVodDuration('')).toBeUndefined();
+    expect(parseVodDuration('0')).toBeUndefined();
+    expect(parseVodDuration(0)).toBeUndefined();
+    expect(parseVodDuration(100_000)).toBeUndefined();
+    expect(parseVodDuration(null)).toBeUndefined();
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parseM3u8Playlist } from './m3u8-parse';
-import { isProxiedUri, rewriteM3u8, stripAdGroups, stripLeadAdGroup } from './m3u8';
+import { isProxiedUri, rewriteM3u8, stripAdGroups, stripLeadAdGroup, stripPreDiscOpeningAdGroup } from './m3u8';
 
 const BASE = 'https://cdn.example.com/live/index.m3u8';
 
@@ -325,3 +325,75 @@ describe('parseM3u8Playlist · 片头广告剔除', () => {
     expect(parsed.segments).toHaveLength(2);
   });
 });
+
+describe('stripPreDiscOpeningAdGroup 与 Group 0 片头广告', () => {
+  function segs(count: number, dur: number, prefix: string): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) out.push(`#EXTINF:${dur},`, `${prefix}${i}.ts`);
+    return out;
+  }
+
+  it('Group 0 命中广告 URL 特征时剔除广告分片并保留头部标签与 KEY/MAP', () => {
+    const playlist = [
+      '#EXTM3U',
+      '#EXT-X-VERSION:3',
+      '#EXT-X-TARGETDURATION:10',
+      '#EXT-X-KEY:METHOD=AES-128,URI="https://cdn.example/key.bin"',
+      '#EXT-X-MAP:URI="init.mp4"',
+      '#EXTINF:5,',
+      '/video/adjump/pre0.ts',
+      '#EXTINF:5,',
+      '/ad_01.ts',
+      '#EXT-X-DISCONTINUITY',
+      '#EXTINF:6,',
+      'main0.ts',
+      '#EXT-X-ENDLIST',
+    ].join('\n');
+    const out = stripAdGroups(playlist);
+    expect(out).not.toContain('adjump');
+    expect(out).not.toContain('/ad_01.ts');
+    expect(out).toContain('#EXT-X-VERSION:3');
+    expect(out).toContain('#EXT-X-KEY:METHOD=AES-128');
+    expect(out).toContain('#EXT-X-MAP:URI="init.mp4"');
+    expect(out).toContain('main0.ts');
+  });
+
+  it('首个 DISCONTINUITY 前有短片头广告且后续长正片 ≥ 120s 时自动剔除', () => {
+    const playlist = [
+      '#EXTM3U',
+      '#EXT-X-TARGETDURATION:10',
+      ...segs(3, 5, 'intro_ad'), // 15s
+      '#EXT-X-DISCONTINUITY',
+      ...segs(30, 6, 'movie'), // 180s
+      '#EXT-X-ENDLIST',
+    ].join('\n');
+    const out = stripPreDiscOpeningAdGroup(playlist);
+    expect(out).not.toContain('intro_ad0.ts');
+    expect(out).toContain('movie0.ts');
+    expect(stripAdGroups(playlist)).not.toContain('intro_ad0.ts');
+  });
+
+  it('后续正片不足 120s 的短测试流不误删 Group 0', () => {
+    const shortStream = [
+      '#EXTM3U',
+      '#EXTINF:4,',
+      'a.ts',
+      '#EXT-X-DISCONTINUITY',
+      '#EXTINF:4,',
+      'b.ts',
+      '#EXT-X-ENDLIST',
+    ].join('\n');
+    expect(stripPreDiscOpeningAdGroup(shortStream)).toBe(shortStream);
+  });
+
+  it('多组周期性同构分段（组数 ≥ 4 且首组接近中位数）不误删正片首段', () => {
+    const lines = ['#EXTM3U', '#EXT-X-TARGETDURATION:10', ...segs(5, 6, 'g0_')];
+    for (let g = 1; g < 6; g++) {
+      lines.push('#EXT-X-DISCONTINUITY', ...segs(5, 6, `g${g}_`));
+    }
+    lines.push('#EXT-X-ENDLIST');
+    const periodic = lines.join('\n');
+    expect(stripPreDiscOpeningAdGroup(periodic)).toBe(periodic);
+  });
+});
+

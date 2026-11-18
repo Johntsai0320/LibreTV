@@ -3,7 +3,7 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import type { QualityEntry, SourceConfig, LiveSourceConfig, SourceSearchOutcome } from './types';
-import { migrateSkipMarks, type SkipMark, type SkipSegment } from './skip-marks';
+import { migrateSkipMarks, normalizeDefaultOpeningSeconds, type SkipMark, type SkipSegment } from './skip-marks';
 import { isQualityEntryFresh, mergeQualityEntries, qualityKey } from './quality';
 import { clearLiveProbeResultsDb, loadLiveProbeResults, saveLiveProbeResults } from './db';
 import { PERSIST_KEY, createThrottledStorage, subscribePersistChanges } from './persist-storage';
@@ -43,6 +43,11 @@ export interface AppSettings {
    * 三类都是「标记区间 → 不播」，所以共用同一个开关；是否连播下一集仍由 autoplayNext 决定。
    */
   autoSkipSegments: boolean;
+  /**
+   * 全局「片头 / 开头广告默认跳过秒数」：0 表示关闭（仅依单剧标记）。
+   * 当视频未单独标过片头且时长足够时，起播自动跳过前 N 秒（单剧显式关闭跳过时例外）。
+   */
+  autoSkipOpeningSeconds: number;
   imageProxyMode: 'direct' | 'proxy' | 'custom';
   /** 用户是否在设置中主动选择过封面图加载方式；为 false 时部署者的 DEFAULT_IMAGE_MODE 默认值可生效 */
   imageProxyModeTouched: boolean;
@@ -371,8 +376,9 @@ export const useAppStore = create<AppState>()(
       // 细进度条默认开启：这是多年既有行为，新增的只是「可以关掉」的入口
       miniProgressBar: true,
       skipMarks: {},
-      // 自动跳过默认开启，但只有用户真正标记过片段才生效
+      // 自动跳过默认开启，但只有用户真正标记过片段（或开启全局片头默认秒数）才生效
       autoSkipSegments: true,
+      autoSkipOpeningSeconds: 0,
       // 直连优先：豆瓣封面有公共镜像 + 内置代理两级兜底（见 buildImageCandidates），
       // 默认省服务器流量；老用户保持已持久化的选择不受影响。
       // 部署者可用 DEFAULT_IMAGE_MODE=proxy 下发内置代理优先（最稳定，吃服务器流量）
@@ -902,15 +908,22 @@ export const useAppStore = create<AppState>()(
         // DEFAULT_RECOMMEND_SOURCE / DEFAULT_IMAGE_MODE 默认值不再覆盖该用户的选择
         const touched = 'recommendSource' in patch;
         const imageTouched = 'imageProxyMode' in patch;
+        const normalizedPatch =
+          'autoSkipOpeningSeconds' in patch
+            ? {
+                ...patch,
+                autoSkipOpeningSeconds: normalizeDefaultOpeningSeconds(patch.autoSkipOpeningSeconds),
+              }
+            : patch;
         // 打开成人内容过滤时，同步取消勾选所有成人源，避免两者并存
-        if (patch.yellowFilter === true) {
+        if (normalizedPatch.yellowFilter === true) {
           const adultKeys = new Set(
             [...get().customAPIs, ...get().envSources]
               .filter((s) => s.isAdult)
               .map((s) => s.key)
           );
           set({
-            ...patch,
+            ...normalizedPatch,
             ...(touched ? { recommendSourceTouched: true } : null),
             ...(imageTouched ? { imageProxyModeTouched: true } : null),
             selectedKeys: get().selectedKeys.filter((k) => !adultKeys.has(k)),
@@ -918,7 +931,7 @@ export const useAppStore = create<AppState>()(
           return;
         }
         set({
-          ...patch,
+          ...normalizedPatch,
           ...(touched ? { recommendSourceTouched: true } : null),
           ...(imageTouched ? { imageProxyModeTouched: true } : null),
         });
@@ -938,14 +951,16 @@ export const useAppStore = create<AppState>()(
       // v8：订阅新增 refreshDays / failStreak——两者都缺省即「纯手动 + 无失败记录」，
       //     与旧行为完全一致，因此无需改写存量数据，仅借版本号让 migrate 跑一遍。
       // v9：新增点播片源收藏（vodFavoriteUrls）与直播源播放列表收藏（liveSourceFavorites）。
+      // v10：新增全局片头/开头广告默认跳过秒数（autoSkipOpeningSeconds）。
       // 此前未声明 version 的存量数据会被视为 v0 并走 migrate 补齐。
-      version: 9,
+      version: 10,
       migrate: (persisted, version) => {
         const state = { ...((persisted ?? {}) as Partial<AppState>) };
         if (!Array.isArray(state.liveRecent)) state.liveRecent = [];
         if (!Array.isArray(state.liveSubscriptions)) state.liveSubscriptions = [];
         if (!Array.isArray(state.vodFavoriteUrls)) state.vodFavoriteUrls = [];
         if (!Array.isArray(state.liveSourceFavorites)) state.liveSourceFavorites = [];
+        state.autoSkipOpeningSeconds = normalizeDefaultOpeningSeconds(state.autoSkipOpeningSeconds);
 
         // v3 的片头/片尾双标记 → v4 的 segments（纯函数，脏数据在内部丢弃）
         state.skipMarks = migrateSkipMarks(
@@ -1025,6 +1040,7 @@ export const useAppStore = create<AppState>()(
         miniProgressBar: s.miniProgressBar,
         skipMarks: s.skipMarks,
         autoSkipSegments: s.autoSkipSegments,
+        autoSkipOpeningSeconds: s.autoSkipOpeningSeconds,
         imageProxyMode: s.imageProxyMode,
         imageProxyModeTouched: s.imageProxyModeTouched,
         customImageProxy: s.customImageProxy,

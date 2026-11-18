@@ -99,6 +99,7 @@ export function SkipMarkPanel({
   const setSkipMark = useAppStore((s) => s.setSkipMark);
   const setSkipMarkEnabled = useAppStore((s) => s.setSkipMarkEnabled);
   const autoSkipSegments = useAppStore((s) => s.autoSkipSegments);
+  const autoSkipOpeningSeconds = useAppStore((s) => s.autoSkipOpeningSeconds);
   const { toast } = useToast();
 
   const segments = (mark?.segments ?? []).slice().sort((a, b) => a.start - b.start);
@@ -424,18 +425,25 @@ export function SkipMarkPanel({
       )}
 
       {/* 全局开关：只读展示（层级与本剧开关不同，改起来去设置里更不容易误解） */}
-      <div className="mt-3 rounded-lg border border-line bg-surface px-3 py-2.5">
+      <div className="mt-3 rounded-lg border border-line bg-surface px-3 py-2.5 space-y-1.5">
         <div className="flex items-center justify-between gap-2">
           <span className="text-xs text-muted">全局 · 自动跳过片段</span>
           <span className={cn('text-xs font-medium', autoSkipSegments ? 'text-accent' : 'text-muted')}>
             {autoSkipSegments ? '已开启' : '已关闭'}
           </span>
         </div>
-        <p className="mt-1 text-[11px] leading-relaxed text-muted">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs text-muted">全局 · 默认跳过开头广告/片头</span>
+          <span className={cn('text-xs font-medium tabular-nums', autoSkipOpeningSeconds > 0 ? 'text-accent' : 'text-muted')}>
+            {autoSkipOpeningSeconds > 0 ? `${autoSkipOpeningSeconds} 秒` : '已关闭'}
+          </span>
+        </div>
+        <p className="text-[11px] leading-relaxed text-muted">
           {autoSkipSegments
             ? '命中片头/中段自动跳段，片尾结束本集（是否连播看「自动连播」）。'
             : '命中片段只显示按钮，不自动跳。'}
-          影响所有剧，在「设置 → 偏好设置」修改。
+          {autoSkipOpeningSeconds > 0 && ' 本剧未单独标过片头时自动套用全局开头跳过秒数；单剧片头标记优先级更高。'}
+          {' '}可在「设置 → 偏好设置」或播放栏修改。
         </p>
       </div>
 

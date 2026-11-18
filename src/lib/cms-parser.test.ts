@@ -44,6 +44,19 @@ describe('parseSearchList', () => {
     expect(parseSearchList({ list: null }, source)).toEqual([]);
     expect(parseSearchList({}, source)).toEqual([]);
   });
+  it('解析 vod_duration 到搜索条目 duration 字段', () => {
+    const data = {
+      list: [
+        { vod_id: 1, vod_name: '电影A', vod_duration: '01:45:00' },
+        { vod_id: 2, vod_name: '电影B', vod_duration: '95分钟' },
+        { vod_id: 3, vod_name: '电影C', vod_duration: '' },
+      ],
+    };
+    const items = parseSearchList(data, source);
+    expect(items[0].duration).toBe(6300);
+    expect(items[1].duration).toBe(5700);
+    expect(items[2].duration).toBeUndefined();
+  });
 });
 
 describe('extractEpisodesFromPlayUrl', () => {
@@ -91,16 +104,18 @@ describe('extractM3u8FromText', () => {
 });
 
 describe('parseDetail', () => {
-  it('解析详情并提取分集', () => {
+  it('解析详情并提取分集与时长', () => {
     const data = {
       list: [{
         vod_id: 1, vod_name: '三体', vod_content: '科幻剧',
+        vod_duration: '45:10',
         vod_play_url: '第1集$https://cdn/1.m3u8#第2集$https://cdn/2.m3u8',
       }],
     };
     const detail = parseDetail(data, source);
     expect(detail.episodes).toHaveLength(2);
     expect(detail.videoInfo.title).toBe('三体');
+    expect(detail.videoInfo.duration).toBe(2710);
     expect(detail.videoInfo.sourceName).toBe('测试源');
   });
 

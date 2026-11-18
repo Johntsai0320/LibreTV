@@ -12,6 +12,60 @@ export function formatTime(seconds: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
+/** 将时长秒数格式化为展示文本（不足 1 秒或非法返回 undefined） */
+export function formatDuration(seconds?: number): string | undefined {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 1) return undefined;
+  return formatTime(Math.round(seconds));
+}
+
+/**
+ * 解析 Apple CMS 的 vod_duration 字符串或数值为秒数。
+ * 兼容常见格式：`01:35:20`、`45:12`、`95分钟`/`95分`/`1小时30分`、`1h30m`、`5400秒`/`5400s`、
+ * 以及裸数字（>= 300 视为秒，10–299 视为 Apple CMS 常见的分钟数）。
+ */
+export function parseVodDuration(raw: unknown): number | undefined {
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw) || raw < 1 || raw > 86400) return undefined;
+    return Math.round(raw);
+  }
+  if (typeof raw !== 'string') return undefined;
+  const text = raw.trim();
+  if (!text) return undefined;
+
+  const hms = text.match(/^(\d{1,2}):([0-5]?\d):([0-5]?\d)$/);
+  if (hms) {
+    const total = Number(hms[1]) * 3600 + Number(hms[2]) * 60 + Number(hms[3]);
+    return total >= 1 && total <= 86400 ? total : undefined;
+  }
+
+  const ms = text.match(/^(\d{1,3}):([0-5]?\d)$/);
+  if (ms) {
+    const total = Number(ms[1]) * 60 + Number(ms[2]);
+    return total >= 1 && total <= 86400 ? total : undefined;
+  }
+
+  if (/(?:小时|時|分钟|分鐘|分|秒|[hms])/i.test(text)) {
+    const hours = text.match(/(\d+(?:\.\d+)?)\s*(?:小时|時|hours?|hrs?|h)/i);
+    const mins = text.match(/(\d+(?:\.\d+)?)\s*(?:分钟|分鐘|分|minutes?|mins?|m(?!s))/i);
+    const secs = text.match(/(\d+(?:\.\d+)?)\s*(?:秒钟|秒鐘|秒|seconds?|secs?|s)/i);
+    if (hours || mins || secs) {
+      const total = Math.round(
+        (hours ? parseFloat(hours[1]) * 3600 : 0) +
+          (mins ? parseFloat(mins[1]) * 60 : 0) +
+          (secs ? parseFloat(secs[1]) : 0)
+      );
+      return total >= 1 && total <= 86400 ? total : undefined;
+    }
+  }
+
+  if (/^\d+$/.test(text)) {
+    const n = Number(text);
+    if (n >= 300 && n <= 86400) return n;
+    if (n >= 10 && n < 300) return n * 60;
+  }
+  return undefined;
+}
+
 export function formatRelativeTime(timestamp: number): string {
   const diff = Date.now() - timestamp;
   if (diff < 60_000) return '刚刚';

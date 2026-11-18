@@ -21,11 +21,13 @@ import { SwitchSourceModal } from '@/components/switch-source';
 import { SkipMarkPanel } from '@/components/skip-mark-panel';
 import {
   endingTailSeconds,
+  OPENING_SKIP_PRESETS,
   skipMarkKey,
   validateSegment,
   withEndingTail,
   type SkipSegment,
 } from '@/lib/skip-marks';
+import { Dropdown, type DropdownOption } from '@/components/dropdown';
 import type { PlayerSkipApi } from '@/components/player-shell';
 import { useToast } from '@/components/toast';
 import { enqueueDownload } from '@/components/download-manager';
@@ -44,7 +46,7 @@ import {
   db,
 } from '@/lib/db';
 import { formatRemarks } from '@/lib/remarks';
-import { cn, formatTime } from '@/lib/utils';
+import { cn, formatDuration, formatTime } from '@/lib/utils';
 
 /**
  * 播放页（唯一入口，替代旧版 watch.html → player.html 跳转链）。
@@ -138,6 +140,12 @@ function WatchContent() {
     if (episodes.length > 0) return Math.min(Math.max(indexParam, 0), episodes.length - 1);
     return indexParam;
   }, [episodes, indexParam]);
+
+  const [episodeDuration, setEpisodeDuration] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    setEpisodeDuration(undefined);
+  }, [currentUrl]);
+  const displayDuration = formatDuration(episodeDuration ?? detailQuery.data?.videoInfo?.duration);
 
   // 跳过片段按剧名记忆：换集不变，换源到同名资源也能命中。
   // 标题缺失（直连链接）时退回 source:vodId，至少保证本源本片可用。
@@ -325,6 +333,7 @@ function WatchContent() {
             <p className="text-xs text-faint">
               {source.name}
               {episodes.length > 0 && ` · 第 ${currentIndex + 1}/${episodes.length} 集`}
+              {displayDuration && ` · ${displayDuration}`}
             </p>
           </div>
           <div className="ml-auto flex items-center gap-1.5 sm:gap-2 shrink-0">
@@ -366,6 +375,7 @@ function WatchContent() {
                   autoplayNext={store.autoplayNext}
                   skipMark={skipMark}
                   autoSkipSegments={store.autoSkipSegments}
+                  autoSkipOpeningSeconds={store.autoSkipOpeningSeconds}
                   volumeBoost={store.volumeBoost}
                   miniProgressBar={store.miniProgressBar}
                   pendingStart={pendingStart}
@@ -388,6 +398,13 @@ function WatchContent() {
                     if (!sourceKey || !vodId) return;
                     useAppStore.getState().setQuality({
                       [qualityKey(sourceKey, vodId)]: { height, from: 'play', timestamp: Date.now() },
+                    });
+                  }}
+                  onDuration={(duration) => {
+                    setEpisodeDuration(duration);
+                    if (!sourceKey || !vodId) return;
+                    useAppStore.getState().setQuality({
+                      [qualityKey(sourceKey, vodId)]: { duration, from: 'play', timestamp: Date.now() },
                     });
                   }}
                 />
@@ -445,15 +462,24 @@ function WatchContent() {
                 <Icon name="star" filled={isFavorited} className="w-3.5 h-3.5" />
                 <span>{isFavorited ? '已收藏' : '收藏'}</span>
               </button>
-              <label className="flex items-center gap-1.5 text-xs text-muted ml-auto cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="h-3.5 w-3.5 accent-[#2563eb]"
-                  checked={store.autoplayNext}
-                  onChange={(e) => store.updateSettings({ autoplayNext: e.target.checked })}
-                />
-                自动连播
-              </label>
+              <div className="ml-auto flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-1.5 text-xs text-muted">
+                  <span>跳过开头</span>
+                  <OpeningSkipDropdown
+                    value={store.autoSkipOpeningSeconds}
+                    onChange={(seconds) => store.updateSettings({ autoSkipOpeningSeconds: seconds })}
+                  />
+                </div>
+                <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="h-3.5 w-3.5 accent-[#2563eb]"
+                    checked={store.autoplayNext}
+                    onChange={(e) => store.updateSettings({ autoplayNext: e.target.checked })}
+                  />
+                  自动连播
+                </label>
+              </div>
             </div>
 
             <SkipMarkPanel
@@ -587,3 +613,26 @@ function HomeButton() {
     </Link>
   );
 }
+
+/** 播放页快捷跳过开头时长选择（与全局设置双向同步，支持回显自定义秒数） */
+function OpeningSkipDropdown({ value, onChange }: { value: number; onChange: (seconds: number) => void }) {
+  const presets: number[] =
+    value > 0 && !(OPENING_SKIP_PRESETS as readonly number[]).includes(value)
+      ? [...OPENING_SKIP_PRESETS, value].sort((a, b) => a - b)
+      : [...OPENING_SKIP_PRESETS];
+  const options: DropdownOption[] = presets.map((n) => ({
+    value: String(n),
+    label: n === 0 ? '关闭' : `${n} 秒`,
+  }));
+
+  return (
+    <Dropdown
+      value={String(value)}
+      onChange={(v) => onChange(Number(v))}
+      options={options}
+      ariaLabel="跳过开头"
+      className="[&>button]:!py-1 [&>button]:!pl-2 [&>button]:!pr-1.5 [&>button]:text-xs"
+    />
+  );
+}
+

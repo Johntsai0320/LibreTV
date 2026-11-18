@@ -5,12 +5,12 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/client-api';
 import type { SearchResultItem, VideoDetail } from '@/lib/types';
-import { buildWatchUrl } from '@/lib/utils';
+import { buildWatchUrl, cn, formatDuration } from '@/lib/utils';
+import { qualityKey } from '@/lib/quality';
 import { formatRemarks } from '@/lib/remarks';
 import { SmartImage } from './smart-image';
 import { useAppStore, resolveSource } from '@/lib/store';
 import { useToast } from './toast';
-import { cn } from '@/lib/utils';
 import { addSearchHistory, db, favoriteIdOf, toggleFavorite } from '@/lib/db';
 import { copyToClipboard } from '@/lib/clipboard';
 import { EmptyState, ErrorState, LoadingState } from './states';
@@ -142,10 +142,13 @@ export function DetailModal({ item, onClose }: { item: SearchResultItem | null; 
 
   // 备注与卡片同源，同样归一化，避免同一部剧在两处显示不同文案
   const remarks = formatRemarks(info?.remarks);
+  const cachedDuration = store.qualityMap[qualityKey(item.sourceKey, item.vodId)]?.duration;
+  const durationLabel = formatDuration(info?.duration ?? cachedDuration ?? item.duration);
   const metaRows = [
     info?.typeName && ['类型', info.typeName],
     info?.year && ['年份', info.year],
     info?.area && ['地区', info.area],
+    durationLabel && ['时长', durationLabel],
     info?.director && ['导演', info.director],
     info?.actor && ['主演', info.actor],
     remarks && ['备注', remarks],

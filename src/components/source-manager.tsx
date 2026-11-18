@@ -31,6 +31,7 @@ import { useAuth } from './auth';
 import { api } from '@/lib/client-api';
 import { AUTO_REFRESH_MAX_FAIL_STREAK, syncSourceSubscription } from '@/lib/subscription-sync';
 import { describeParseStats } from '@/lib/tvbox-parser';
+import { OPENING_SKIP_PRESETS, normalizeDefaultOpeningSeconds } from '@/lib/skip-marks';
 
 /**
  * 设置抽屉：顶部两级导航。
@@ -595,7 +596,7 @@ function PlaybackPanel() {
       <div className="space-y-3">
         <ToggleRow
           label="广告切片过滤"
-          description="剔除播放列表中的广告分片段落（按分片 URL 特征、片头插入与长片间超短中插识别，不动 DISCONTINUITY 时间轴）"
+          description="剔除播放列表中的广告分片段落（按分片 URL 特征、片头插入与首段前短广告、长片间超短中插识别，不动 DISCONTINUITY 时间轴）"
           checked={store.adFilter}
           onChange={(v) => store.updateSettings({ adFilter: v })}
         />
@@ -610,6 +611,10 @@ function PlaybackPanel() {
           description="命中片头/中段标记时跳到片段末尾，命中片尾标记时结束本集（是否连播下一集由「自动连播」决定）；关闭后三类都只显示跳过按钮（标记在播放页「跳过标记」中设置）"
           checked={store.autoSkipSegments}
           onChange={(v) => store.updateSettings({ autoSkipSegments: v })}
+        />
+        <OpeningAdSkipRow
+          seconds={store.autoSkipOpeningSeconds}
+          onChange={(v) => store.updateSettings({ autoSkipOpeningSeconds: v })}
         />
         <ToggleRow
           label="音量增强"
@@ -653,6 +658,94 @@ function PlaybackPanel() {
 
       <VideoCachePanel />
     </section>
+  );
+}
+
+/** 全局默认跳过开头广告秒数：预设下拉 + 自定义秒数输入 */
+function OpeningAdSkipRow({ seconds, onChange }: { seconds: number; onChange: (v: number) => void }) {
+  const isPreset = (OPENING_SKIP_PRESETS as readonly number[]).includes(seconds);
+  const [customMode, setCustomMode] = useState(!isPreset);
+  const [draft, setDraft] = useState(() => (seconds > 0 ? String(seconds) : '15'));
+
+  useEffect(() => {
+    const preset = (OPENING_SKIP_PRESETS as readonly number[]).includes(seconds);
+    setCustomMode(!preset);
+    if (seconds > 0) setDraft(String(seconds));
+  }, [seconds]);
+
+  const options: DropdownOption[] = [
+    ...OPENING_SKIP_PRESETS.map((n) => ({
+      value: String(n),
+      label: n === 0 ? '关闭' : `${n} 秒`,
+    })),
+    { value: 'custom', label: '自定义秒数' },
+  ];
+
+  const selectValue = customMode ? 'custom' : String(seconds);
+
+  const commitCustom = (raw: string) => {
+    const parsed = Number(raw.trim());
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setDraft(seconds > 0 ? String(seconds) : '15');
+      return;
+    }
+    const normalized = normalizeDefaultOpeningSeconds(parsed);
+    if (normalized > 0) {
+      setDraft(String(normalized));
+      onChange(normalized);
+    }
+  };
+
+  return (
+    <div className="space-y-2 py-0.5">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-sm text-content">默认跳过开头广告</div>
+          <div className="text-xs text-faint">
+            未单独标记片头时默认跳过片头前 N 秒（需配合「自动跳过片段」或显示跳过按钮，单剧标记优先）
+          </div>
+        </div>
+        <Dropdown
+          value={selectValue}
+          onChange={(v) => {
+            if (v === 'custom') {
+              setCustomMode(true);
+              const fallback = seconds > 0 ? seconds : 15;
+              setDraft(String(fallback));
+              if (seconds === 0) onChange(fallback);
+            } else {
+              setCustomMode(false);
+              onChange(Number(v));
+            }
+          }}
+          options={options}
+          ariaLabel="默认跳过开头广告"
+          className="shrink-0 [&>button]:!py-1.5 [&>button]:!pl-2.5 [&>button]:!pr-2 [&>button]:text-xs"
+        />
+      </div>
+      {customMode && (
+        <div className="flex items-center justify-end gap-2 text-xs text-faint">
+          <span>自定义跳过前</span>
+          <input
+            type="number"
+            min={3}
+            max={600}
+            aria-label="自定义跳过开头秒数"
+            className="input !w-20 !py-1 text-xs text-center tabular-nums"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={() => commitCustom(draft)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                commitCustom(draft);
+              }
+            }}
+          />
+          <span>秒（3–600）</span>
+        </div>
+      )}
+    </div>
   );
 }
 

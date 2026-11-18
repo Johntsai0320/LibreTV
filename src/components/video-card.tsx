@@ -4,9 +4,9 @@ import { useEffect, useMemo, useState } from 'react';
 import type { SearchResultItem, SourceConfig } from '@/lib/types';
 import { useAppStore } from '@/lib/store';
 import { favoriteIdOf, toggleFavorite } from '@/lib/db';
-import { qualityKey } from '@/lib/quality';
+import { bestGroupDuration, qualityKey } from '@/lib/quality';
 import { compactRemarks, formatRemarks, inferGroupRemarks } from '@/lib/remarks';
-import { cn } from '@/lib/utils';
+import { cn, formatDuration } from '@/lib/utils';
 import { toSimplified } from '@/lib/zh-conv';
 import { SmartImage } from './smart-image';
 import { QualityBadge } from './quality-badge';
@@ -85,12 +85,15 @@ export function AggregatedCard({
   onOpen,
   sources,
   favoriteIds,
+  qualityEpoch = 0,
 }: {
   group: AggregatedGroup;
   onOpen: (item: SearchResultItem) => void;
   /** 完整源配置：探测画质需要 source.url / source.detail，搜索结果里只带 sourceUrl */
   sources?: SourceConfig[];
   favoriteIds?: Set<string>;
+  /** 批量探测更新时递增，触发收起态卡片同步读取新落盘的画质缓存 */
+  qualityEpoch?: number;
 }) {
   const imageProxyMode = useAppStore((s) => s.imageProxyMode);
   const customImageProxy = useAppStore((s) => s.customImageProxy);
@@ -127,13 +130,12 @@ export function AggregatedCard({
   useEffect(() => {
     prime(group.items);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [group.key]);
+  }, [group.key, qualityEpoch]);
 
-  // 单源卡片没有「展开」这一步：进入视口 500ms 后交给全局队列（并发 2），
-  // 首屏能先亮，又不会把一屏十几张卡同时打向源站
-  const { ref: inViewRef, inView } = useInView<HTMLDivElement>(!multi);
+  // 进入视口 500ms 后交给全局队列（并发 2）：单源探测全部，多源仅探首个主源以在收起态补齐画质与时长
+  const { ref: inViewRef, inView } = useInView<HTMLDivElement>(true);
   useEffect(() => {
-    if (!multi && inView) probeQueued(group.items);
+    if (inView) probeQueued(multi ? [group.items[0]] : group.items, { preserveTargets: multi });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [multi, inView, group.key]);
 
@@ -149,6 +151,8 @@ export function AggregatedCard({
 
   const singleItem = multi ? undefined : group.items[0];
   const singleKey = singleItem ? qualityKey(singleItem.sourceKey, singleItem.vodId) : undefined;
+  const bestDuration = bestGroupDuration(group.items, qualities);
+  const durationLabel = formatDuration(bestDuration);
 
   // 展开面板按画质降序（同级保持原有源顺序）：探到一个更好的就往上走，
   // 用户不必自己横向比较三行灰字。没探到 / 未探到的排在最后。
@@ -214,6 +218,14 @@ export function AggregatedCard({
                 {group.items.length} 源
               </span>
             )}
+            {durationLabel && (
+              <span
+                className="absolute bottom-1.5 right-1.5 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-medium text-white tabular-nums"
+                title={`影片时长 ${durationLabel}`}
+              >
+                {durationLabel}
+              </span>
+            )}
           </div>
         ) : (
           <div className="relative flex-shrink-0 w-[105px] sm:w-[120px] aspect-[2/3] bg-chip flex items-center justify-center">
@@ -223,6 +235,14 @@ export function AggregatedCard({
             {multi && (
               <span className="absolute top-1.5 left-1.5 tag bg-black/70 text-accent font-medium">
                 {group.items.length} 源
+              </span>
+            )}
+            {durationLabel && (
+              <span
+                className="absolute bottom-1.5 right-1.5 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-medium text-white tabular-nums"
+                title={`影片时长 ${durationLabel}`}
+              >
+                {durationLabel}
               </span>
             )}
           </div>
@@ -330,6 +350,7 @@ export function AggregatedCard({
             {sortedItems.map((item) => {
               const itemKey = qualityKey(item.sourceKey, item.vodId);
               const label = compactRemarks(item.remarks);
+              const itemDuration = formatDuration(qualities[itemKey]?.duration ?? item.duration);
               const isBest = itemKey === bestKey;
               const rowFavorited = Boolean(favoriteIds?.has(favoriteIdOf(item.sourceKey, item.vodId)));
               return (
@@ -366,6 +387,11 @@ export function AggregatedCard({
                     // 定宽 + 等宽数字：三行的 360P / 540P / 1080P 左缘对齐，不随字符数抖动
                     className="min-w-[3.25rem] justify-center tabular-nums"
                   />
+                  {itemDuration && (
+                    <span className="text-[11px] text-faint shrink-0 tabular-nums" title={`时长 ${itemDuration}`}>
+                      {itemDuration}
+                    </span>
+                  )}
                   {/* 集数一致时已提到表头，逐行不再重复 */}
                   {!sharedRemarks && label && (
                     <span className="text-faint shrink-0 tabular-nums">{label}</span>
@@ -421,6 +447,7 @@ export function VideoCard({
   const [imgFailed, setImgFailed] = useState(false);
   const showImg = !!item.pic && !imgFailed;
   const isFavorited = Boolean(favoriteIds?.has(favoriteIdOf(item.sourceKey, item.vodId)));
+  const durationLabel = formatDuration(item.duration);
 
   const handleToggleFavorite = async () => {
     const added = await toggleFavorite({
@@ -463,12 +490,28 @@ export function VideoCard({
               onExhausted={() => setImgFailed(true)}
             />
             <div className="absolute inset-0 bg-gradient-to-r from-black/30 to-transparent" />
+            {durationLabel && (
+              <span
+                className="absolute bottom-1.5 right-1.5 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-medium text-white tabular-nums"
+                title={`影片时长 ${durationLabel}`}
+              >
+                {durationLabel}
+              </span>
+            )}
           </div>
         ) : (
-          <div className="flex-shrink-0 w-[105px] sm:w-[120px] aspect-[2/3] bg-chip flex items-center justify-center">
+          <div className="relative flex-shrink-0 w-[105px] sm:w-[120px] aspect-[2/3] bg-chip flex items-center justify-center">
             <svg className="w-8 h-8 text-faint" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 4v16m10-16v16M3 6a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V6zm4 0a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1h-1a1 1 0 01-1-1V6zm8 0a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1h-1a1 1 0 01-1-1V6zm4 0a1 1 0 011-1h1a1 1 0 011 1v12a1 1 0 01-1 1h-1a1 1 0 01-1-1V6z" />
             </svg>
+            {durationLabel && (
+              <span
+                className="absolute bottom-1.5 right-1.5 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-medium text-white tabular-nums"
+                title={`影片时长 ${durationLabel}`}
+              >
+                {durationLabel}
+              </span>
+            )}
           </div>
         )}
 

@@ -915,7 +915,8 @@ export const useAppStore = create<AppState>()(
                 autoSkipOpeningSeconds: normalizeDefaultOpeningSeconds(patch.autoSkipOpeningSeconds),
               }
             : patch;
-        // 打开成人内容过滤时，同步取消勾选所有成人源，避免两者并存
+        // 打开成人内容过滤时，同步取消勾选所有成人源，避免两者并存；
+        // 从开启切回关闭（开启 R18 模式）时，同步勾回已配置的成人源，在搜索页一键切换即可生效
         if (normalizedPatch.yellowFilter === true) {
           const adultKeys = new Set(
             [...get().customAPIs, ...get().envSources]
@@ -927,6 +928,18 @@ export const useAppStore = create<AppState>()(
             ...(touched ? { recommendSourceTouched: true } : null),
             ...(imageTouched ? { imageProxyModeTouched: true } : null),
             selectedKeys: get().selectedKeys.filter((k) => !adultKeys.has(k)),
+          });
+          return;
+        }
+        if (normalizedPatch.yellowFilter === false && get().yellowFilter === true) {
+          const adultKeys = [...get().customAPIs, ...get().envSources]
+            .filter((s) => s.isAdult)
+            .map((s) => s.key);
+          set({
+            ...normalizedPatch,
+            ...(touched ? { recommendSourceTouched: true } : null),
+            ...(imageTouched ? { imageProxyModeTouched: true } : null),
+            selectedKeys: [...new Set([...get().selectedKeys, ...adultKeys])],
           });
           return;
         }

@@ -113,6 +113,31 @@ function HomeContent() {
     [selectedKeys, sourceHealth, subscriptions]
   );
 
+  const r18Enabled = !yellowFilter;
+  const adultSourceCount = useMemo(() => {
+    const seen = new Set<string>();
+    return [...customAPIs, ...envSources].filter((s) => {
+      if (!s.isAdult || seen.has(s.key) || !validateSourceUrl(s.url)) return false;
+      seen.add(s.key);
+      return !isInDisabledSubscription({ subscriptions }, s.key);
+    }).length;
+  }, [customAPIs, envSources, subscriptions]);
+
+  const toggleR18 = () => {
+    const nextEnabled = yellowFilter;
+    useAppStore.getState().updateSettings({ yellowFilter: !nextEnabled });
+    if (nextEnabled) {
+      toast(
+        adultSourceCount > 0
+          ? `已开启 R18 模式（已启用 ${adultSourceCount} 个 18+ 点播源）`
+          : '已开启 R18 模式（已解除伦理/18+ 分类过滤）',
+        'info'
+      );
+    } else {
+      toast('已关闭 R18 模式（已隐藏 18+ 内容）', 'info');
+    }
+  };
+
   const restoreDisabledSources = (silent = false) => {
     if (disabledSources.length === 0) return 0;
     const count = disabledSources.length;
@@ -240,7 +265,7 @@ function HomeContent() {
     setCategoryFilter('all');
     setSubTypeFilter('all');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [urlQuery]);
+  }, [urlQuery, yellowFilter]);
 
   const categoryOptions = useMemo(() => buildCategoryOptions(groups), [groups]);
   const showBroadCategories = categoryOptions.length >= 2;
@@ -436,6 +461,51 @@ function HomeContent() {
                 onClearAll={searchHistory.clearAll}
               />
             )}
+          </div>
+
+          {/* R18 开关：与设置页「成人内容过滤」双向同步 */}
+          <div className="w-full max-w-2xl mt-2.5 flex items-center justify-between gap-2 text-xs">
+            <span className="text-faint truncate">
+              {r18Enabled
+                ? adultSourceCount > 0
+                  ? `R18 模式已开启 · 包含 ${adultSourceCount} 个 18+ 点播源`
+                  : 'R18 模式已开启 · 已解除伦理/18+ 分类过滤'
+                : ''}
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={r18Enabled}
+              aria-label="R18 内容开关"
+              onClick={toggleR18}
+              title={
+                r18Enabled
+                  ? '点击关闭 R18 模式（恢复隐藏 18+ 源与敏感分类）'
+                  : '点击开启 R18 模式（启用 18+ 源并显示敏感分类）'
+              }
+              className={cn(
+                'inline-flex items-center gap-2 px-2.5 py-1 rounded-full border transition-colors shrink-0 select-none',
+                r18Enabled
+                  ? 'border-pink-500/50 bg-pink-500/15 text-pink-500 dark:text-pink-400 font-medium'
+                  : 'border-line bg-chip text-muted hover:text-content hover:bg-hover'
+              )}
+            >
+              <span className="tracking-wide font-semibold">R18</span>
+              <span
+                aria-hidden
+                className={cn(
+                  'relative inline-flex h-4 w-7 items-center rounded-full transition-colors',
+                  r18Enabled ? 'bg-pink-500' : 'bg-line'
+                )}
+              >
+                <span
+                  className={cn(
+                    'inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform',
+                    r18Enabled ? 'translate-x-3.5' : 'translate-x-0.5'
+                  )}
+                />
+              </span>
+            </button>
           </div>
         </section>
 

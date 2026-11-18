@@ -666,3 +666,37 @@ describe('默认跳过开头广告设置项', () => {
   });
 });
 
+describe('R18 过滤与成人源联动', () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      customAPIs: [
+        { key: 'normal_0', name: '普通源', url: 'https://normal.example.com/api.php/provide/vod', isAdult: false },
+        { key: 'adult_0', name: '成人源A', url: 'https://a18.example.com/api.php/provide/vod', isAdult: true },
+      ],
+      envSources: [
+        { key: 'env_adult', name: '预置成人源', url: 'https://env18.example.com/api.php/provide/vod', isAdult: true },
+      ],
+      selectedKeys: ['normal_0'],
+      yellowFilter: true,
+    });
+  });
+
+  it('开启 R18（yellowFilter: false）时自动勾选已配置的成人源，关闭时取消勾选并保留普通源', () => {
+    store().updateSettings({ yellowFilter: false });
+    expect(store().yellowFilter).toBe(false);
+    expect(store().selectedKeys).toEqual(['normal_0', 'adult_0', 'env_adult']);
+
+    store().updateSettings({ yellowFilter: true });
+    expect(store().yellowFilter).toBe(true);
+    expect(store().selectedKeys).toEqual(['normal_0']);
+  });
+
+  it('已处于 R18 开启状态时不会强行勾回用户手动取消的成人源', () => {
+    store().updateSettings({ yellowFilter: false });
+    store().toggleSourceSelected('adult_0');
+    expect(store().selectedKeys).toEqual(['normal_0', 'env_adult']);
+
+    store().updateSettings({ yellowFilter: false, doubanEnabled: false });
+    expect(store().selectedKeys).toEqual(['normal_0', 'env_adult']);
+  });
+});

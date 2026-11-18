@@ -7,14 +7,17 @@ import { Spinner } from './states';
 import { prefersTouchPointer } from '@/lib/touch-pointer';
 import { ART_DEFAULT_CONTROL_HIDE_MS, TOUCH_CONTROL_HIDE_MS } from '@/lib/control-hide';
 import { attachVolumeBoost, type VolumeBoostHandle } from '@/lib/volume-boost';
+import { parseYouTubeLiveTarget } from '@/lib/youtube';
 
 /**
  * 直播播放器：与点播 player-shell 完全独立。
- * - 引擎分发：.m3u8 → hls.js（直播参数）；.flv → mpegts.js（动态加载，按需 ~150KB）；
+ * - 引擎分发：YouTube 直播页 → youtube-nocookie iframe 嵌入（或引導外部開啟）；
+ *   .m3u8 → hls.js（直播参数）；.flv / .ts → mpegts.js（动态加载，按需 ~150KB）；
  *   mp4/webm 等原生容器 → <video> 直接播放；
  * - 无扩展名的地址（如 /channel/xxx?token=...）默认按 HLS 处理，
  *   HLS 直连与代理均失败后**回退原生播放**一次（覆盖"内容是 MP4 却无 .m3u8 后缀"的源）；
- * - 每级直连失败自动切换到 /api/live/stream 代理通道重试一次；
+ * - 带 Referer/User-Agent 的频道直接走 /api/live/stream 代理通道（浏览器不允许前端设置受限请求头）；
+ *   其余频道直连优先，失败自动切换到 /api/live/stream 代理通道重试一次；
  * - 直播态 UI：无进度条、无倍速、无截图、无连播。
  */
 
@@ -27,25 +30,39 @@ export function isFlvUrl(url: string): boolean {
   return /\.flv(\?|$)/i.test(url);
 }
 
-/** 浏览器原生可播的直链容器（非 HLS/FLV） */
+export function isMpegTsUrl(url: string): boolean {
+  return /\.(ts|mts)(\?|$)/i.test(url);
+}
+
+export function isDashUrl(url: string): boolean {
+  return /\.mpd(\?|$)|format=mpd/i.test(url);
+}
+
+/** 浏览器原生可播的直链容器（非 HLS/FLV/TS） */
 const NATIVE_MEDIA_RE = /\.(mp4|m4v|webm|ogv|ogg|mov)(\?|$)/i;
 
-type Engine = 'hls' | 'flv' | 'native';
+type Engine = 'hls' | 'flv' | 'mpegts' | 'native';
 
 function engineOf(url: string): Engine {
   if (isFlvUrl(url)) return 'flv';
+  if (isMpegTsUrl(url)) return 'mpegts';
   if (NATIVE_MEDIA_RE.test(url)) return 'native';
   return 'hls';
 }
 
-function proxyUrl(url: string): string {
-  return STREAM_PROXY_BASE + encodeURIComponent(url);
+function proxyUrl(url: string, referrer?: string, userAgent?: string): string {
+  let out = STREAM_PROXY_BASE + encodeURIComponent(url);
+  if (referrer) out += `&ref=${encodeURIComponent(referrer)}`;
+  if (userAgent) out += `&ua=${encodeURIComponent(userAgent)}`;
+  return out;
 }
 
 interface LivePlayerProps {
-  /** 上游直播流地址（直连优先，失败自动走代理） */
+  /** 上游直播流地址（直连优先，失败自动走代理；带 Referer/UA 直接走代理） */
   url: string;
   title: string;
+  referrer?: string;
+  userAgent?: string;
   /** 上一台/下一台：传入时注册为播放器控制条按钮（全屏内也可操作） */
   onPrevChannel?: () => void;
   onNextChannel?: () => void;
@@ -53,7 +70,15 @@ interface LivePlayerProps {
   volumeBoost: boolean;
 }
 
-export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoost }: LivePlayerProps) {
+export function LivePlayer({
+  url,
+  title,
+  referrer,
+  userAgent,
+  onPrevChannel,
+  onNextChannel,
+  volumeBoost,
+}: LivePlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const artRef = useRef<any>(null);
@@ -77,6 +102,9 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
   const volumeBoostSettingRef = useRef(volumeBoost);
   volumeBoostSettingRef.current = volumeBoost;
 
+  const ytTarget = url ? parseYouTubeLiveTarget(url) : null;
+  const dashUnsupported = url ? isDashUrl(url) : false;
+
   // url 变化即换台：显示频道名 2.5s
   useEffect(() => {
     if (!url) return;
@@ -95,7 +123,20 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
   };
 
   useEffect(() => {
-    if (!containerRef.current || !url) return;
+    if (!url) return;
+    if (ytTarget) {
+      setShowPoster(false);
+      setLoading(false);
+      setError(ytTarget.kind === 'invalid' ? '无效的 YouTube 直播地址，请尝试其他频道' : '');
+      return;
+    }
+    if (dashUnsupported) {
+      setShowPoster(false);
+      setLoading(false);
+      setError('暂不支持 MPEG-DASH (.mpd) 格式直播流，请尝试其他频道');
+      return;
+    }
+    if (!containerRef.current) return;
     setError('');
     setLoading(true);
     setShowPoster(true);
@@ -105,6 +146,8 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
     let destroyed = false;
     /** 原生播放注册的 error 监听清理函数（切台/销毁时调用） */
     let nativeCleanup: (() => void) | null = null;
+    const mustProxy = Boolean(referrer || userAgent);
+    const proxiedEntry = proxyUrl(url, referrer, userAgent);
 
     const cleanupEngines = () => {
       hlsRef.current?.destroy();
@@ -138,7 +181,7 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
         if (disposed || destroyed) return;
         if (allowProxyFallback && !mediaUrl.startsWith(STREAM_PROXY_PREFIX)) {
           showHint('直连失败，改用代理重试...');
-          setupNative(video, proxyUrl(url), false, failMessage);
+          setupNative(video, proxiedEntry, false, failMessage);
           return;
         }
         setError(failMessage || '该地址不是可播放的直播流（内容可能是文件或错误提示）');
@@ -206,12 +249,17 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
           ) {
             showHint('直连失败，改用代理重试...');
             // 直播 manifest 重写需要本站前缀，交给代理通道
-            setupHls(video, proxyUrl(url), 'proxy');
+            setupHls(video, proxiedEntry, 'proxy');
             return;
           }
           // HLS 直连与代理均失败：可能是"无 .m3u8 后缀但内容是 MP4"的源，回退原生播放
           showHint('HLS 解析失败，尝试原生播放...');
-          setupNative(video, url, true, `直播流加载失败${codeHint}，可能该频道已失效，请尝试其他频道`);
+          setupNative(
+            video,
+            mustProxy ? proxiedEntry : url,
+            !mustProxy,
+            `直播流加载失败${codeHint}，可能该频道已失效，请尝试其他频道`
+          );
           return;
         }
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
@@ -226,9 +274,10 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
       });
     };
 
-    const setupFlv = async (
+    const setupMpegts = async (
       video: HTMLVideoElement,
       mediaUrl: string,
+      streamType: 'flv' | 'mpegts',
       allowProxyFallback: boolean
     ) => {
       cleanupEngines();
@@ -237,17 +286,17 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
       try {
         Mpegts = (await import('mpegts.js')).default;
       } catch {
-        setError('FLV 播放模块加载失败，请检查网络后重试');
+        setError('流媒体播放模块加载失败，请检查网络后重试');
         return;
       }
       if (disposed || destroyed) return;
       if (!Mpegts.getFeatureList().mseLivePlayback) {
-        setError('当前浏览器不支持 FLV 直播播放');
+        setError('当前浏览器不支持该直播流播放');
         return;
       }
       const player = Mpegts.createPlayer(
         {
-          type: 'flv',
+          type: streamType,
           isLive: true,
           url: mediaUrl,
         },
@@ -266,7 +315,7 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
         if (disposed || destroyed) return;
         if (!playbackStarted && allowProxyFallback && !mediaUrl.startsWith(STREAM_PROXY_PREFIX)) {
           showHint('直连失败，改用代理重试...');
-          void setupFlv(video, proxyUrl(url), false);
+          void setupMpegts(video, proxiedEntry, streamType, false);
           return;
         }
         setError(`直播流加载失败（${errType}），请尝试其他频道`);
@@ -275,6 +324,7 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
     };
 
     const engine = engineOf(url);
+    const initialUrl = mustProxy ? proxiedEntry : url;
     // 上一台/下一台：注册到播放器控制条（普通态与全屏均可见），未传不显示
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const controls: any[] = [];
@@ -307,9 +357,9 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
 
     const art = new Artplayer({
       container: containerRef.current,
-      url,
+      url: initialUrl,
       // 原生容器统一用 'mp4'（仅用于选择处理函数，实际容器由浏览器嗅探）
-      type: engine === 'flv' ? 'flv' : engine === 'native' ? 'mp4' : 'm3u8',
+      type: engine === 'flv' ? 'flv' : engine === 'mpegts' ? 'mpegts' : engine === 'native' ? 'mp4' : 'm3u8',
       volume: 0.9,
       autoplay: true,
       // —— 直播态：关闭点播专属能力 ——
@@ -332,13 +382,16 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
       moreVideoAttr: { playsInline: true },
       customType: {
         m3u8: (video: HTMLVideoElement) => {
-          setupHls(video, url, 'direct');
+          setupHls(video, initialUrl, mustProxy ? 'proxy' : 'direct');
         },
         flv: (video: HTMLVideoElement) => {
-          void setupFlv(video, url, true);
+          void setupMpegts(video, initialUrl, 'flv', !mustProxy);
+        },
+        mpegts: (video: HTMLVideoElement) => {
+          void setupMpegts(video, initialUrl, 'mpegts', !mustProxy);
         },
         mp4: (video: HTMLVideoElement) => {
-          setupNative(video, url, true);
+          setupNative(video, initialUrl, !mustProxy);
         },
       },
     });
@@ -393,7 +446,7 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
       destroyed = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, retryNonce, onPrevChannel, onNextChannel]);
+  }, [url, referrer, userAgent, retryNonce, onPrevChannel, onNextChannel]);
 
   // —— 音量放大开关：播放中改设置即时生效，不必等重新起播 ——
   // 关闭走「单位增益直通」而不是拆链：createMediaElementSource 之后元素输出只走
@@ -409,11 +462,39 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
     }
   }, [volumeBoost]);
 
+  const canEmbedYouTube = ytTarget && (ytTarget.kind === 'video' || ytTarget.kind === 'channel');
+
   return (
     <div className="relative w-full h-full">
-      <div ref={containerRef} className="w-full h-full" />
+      {canEmbedYouTube ? (
+        <iframe
+          key={`${ytTarget.embedUrl}-${retryNonce}`}
+          src={ytTarget.embedUrl}
+          title={title}
+          className="w-full h-full border-0 bg-black"
+          allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+          allowFullScreen
+          referrerPolicy="strict-origin-when-cross-origin"
+        />
+      ) : ytTarget?.kind === 'handle' ? (
+        <div className="w-full h-full flex flex-col items-center justify-center gap-3 bg-black/95 px-6 text-center">
+          <p className="text-sm text-white/85">
+            此頻道使用 YouTube 頻道頁連結，無法直接內嵌播放
+          </p>
+          <a
+            href={ytTarget.watchUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn-primary text-xs"
+          >
+            前往 YouTube 觀看直播
+          </a>
+        </div>
+      ) : (
+        <div ref={containerRef} className="w-full h-full" />
+      )}
       {/* 起播前的品牌占位图 */}
-      {showPoster && !error && (
+      {!ytTarget && !dashUnsupported && showPoster && !error && (
         <div
           className="absolute inset-0 bg-black pointer-events-none"
           style={{
@@ -425,7 +506,7 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
         />
       )}
       {/* LIVE 呼吸标识 */}
-      {!error && (
+      {!error && !canEmbedYouTube && (
         <div className="absolute top-3 right-3 flex items-center gap-1.5 bg-black/60 px-2 py-1 rounded-full pointer-events-none">
           <span className="live-dot" />
           <span className="text-[10px] font-semibold text-white tracking-wider">LIVE</span>
@@ -437,7 +518,7 @@ export function LivePlayer({ url, title, onPrevChannel, onNextChannel, volumeBoo
           <span className="text-sm font-medium text-white truncate">{osdTitle}</span>
         </div>
       )}
-      {loading && !error && (
+      {!ytTarget && !dashUnsupported && loading && !error && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/40 pointer-events-none">
           <Spinner size="lg" tone="onDark" />
         </div>

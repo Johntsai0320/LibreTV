@@ -39,7 +39,11 @@ function mockUpstream(): { fn: ReturnType<typeof vi.fn> } {
   return { fn };
 }
 
-function makeRequest(urls: string[], stream: boolean): Request {
+function makeRequest(
+  urls: string[],
+  stream: boolean,
+  headers?: Record<string, { referrer?: string; userAgent?: string }>
+): Request {
   const { token } = signSession();
   return new Request(`https://local.test/api/live/probe${stream ? '?stream=1' : ''}`, {
     method: 'POST',
@@ -47,7 +51,7 @@ function makeRequest(urls: string[], stream: boolean): Request {
       'Content-Type': 'application/json',
       cookie: `${SESSION_COOKIE}=${token}`,
     },
-    body: JSON.stringify({ urls }),
+    body: JSON.stringify(headers ? { urls, headers } : { urls }),
   });
 }
 
@@ -287,5 +291,67 @@ describe('POST /api/live/probe', () => {
     } finally {
       delete process.env.LIVE_ALLOW_PRIVATE;
     }
+  });
+
+  it('攜帶自定義 headers 時將 Referer 與 User-Agent 透傳給上游', async () => {
+    const seenHeaders: Array<Record<string, string>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const h = (init?.headers ?? {}) as Record<string, string>;
+        seenHeaders.push(h);
+        if (h.Referer !== 'https://mov3.co/' || h['User-Agent'] !== 'JapanPlayer/1.0') {
+          return new Response('forbidden', { status: 403 });
+        }
+        if (url.includes('nhk.m3u8')) return jsonRes(MEDIA, 'application/vnd.apple.mpegurl');
+        return new Response('x', { status: 206, headers: { 'content-type': 'video/mp2t' } });
+      })
+    );
+
+    const streamUrl = 'https://nhk4.mov3.co/hls/nhk.m3u8';
+    const res = await POST(
+      makeRequest([streamUrl], true, {
+        [streamUrl]: { referrer: 'https://mov3.co/', userAgent: 'JapanPlayer/1.0' },
+      })
+    );
+    const [line] = await readNdjson(res);
+    expect(line.ok).toBe(true);
+    expect(line.level).toBe('segment');
+    expect(seenHeaders.length).toBeGreaterThan(0);
+    expect(seenHeaders.every((h) => h.Referer === 'https://mov3.co/' && h['User-Agent'] === 'JapanPlayer/1.0')).toBe(
+      true
+    );
+  });
+
+  it('YouTube 直播網址改走 oEmbed 探測可用性', async () => {
+    const seenUrls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        seenUrls.push(url);
+        if (url.includes('forbidden')) return new Response('Unauthorized', { status: 401 });
+        return jsonRes('{"title":"Live News"}', 'application/json');
+      })
+    );
+
+    const okUrl = 'https://www.youtube.com/watch?v=dZp87qnWelE';
+    const forbiddenUrl = 'https://www.youtube.com/watch?v=forbidden123';
+    const res = await POST(makeRequest([okUrl, forbiddenUrl], false));
+    const data = (await res.json()) as { results: Array<Record<string, unknown>> };
+    expect(data.results).toHaveLength(2);
+    expect(data.results[0]).toMatchObject({ url: okUrl, ok: true, level: 'head' });
+    expect(data.results[1]).toMatchObject({ url: forbiddenUrl, ok: false });
+    expect(String(data.results[1].error)).toContain('禁止嵌入');
+    expect(seenUrls.every((u) => u.startsWith('https://www.youtube.com/oembed?'))).toBe(true);
+  });
+
+  it('標記暫不支援的 MPEG-DASH (.mpd) 流為不可用', async () => {
+    mockUpstream();
+    const res = await POST(makeRequest(['https://cdn.test/live/stream.mpd'], true));
+    const [line] = await readNdjson(res);
+    expect(line.ok).toBe(false);
+    expect(String(line.error)).toContain('MPEG-DASH');
   });
 });

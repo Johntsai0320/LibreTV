@@ -38,6 +38,8 @@ function toM3uText(playlist: LivePlaylistResponse): string {
       .filter(Boolean)
       .join(' ');
     lines.push(`#EXTINF:-1 ${attrs},${c.name}`);
+    if (c.referrer) lines.push(`#EXTVLCOPT:http-referrer=${c.referrer}`);
+    if (c.userAgent) lines.push(`#EXTVLCOPT:http-user-agent=${c.userAgent}`);
     lines.push(c.url);
   }
   return lines.join('\n');

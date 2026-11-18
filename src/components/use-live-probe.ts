@@ -112,8 +112,22 @@ export function useLiveProbe() {
   }, []);
 
   const probe = useCallback(
-    async (targets: { url: string }[]) => {
-      const allUrls = [...new Set(targets.map((t) => t.url))];
+    async (targets: { url: string; referrer?: string; userAgent?: string }[]) => {
+      const headersByUrl: Record<string, { referrer?: string; userAgent?: string }> = {};
+      const seenUrls = new Set<string>();
+      const allUrls: string[] = [];
+      for (const t of targets) {
+        if (!seenUrls.has(t.url)) {
+          seenUrls.add(t.url);
+          allUrls.push(t.url);
+        }
+        if ((t.referrer || t.userAgent) && !headersByUrl[t.url]) {
+          headersByUrl[t.url] = {
+            ...(t.referrer ? { referrer: t.referrer } : {}),
+            ...(t.userAgent ? { userAgent: t.userAgent } : {}),
+          };
+        }
+      }
       if (allUrls.length === 0) return;
       if (allUrls.length > MAX_TARGETS) {
         showHint(`频道数超过 ${MAX_TARGETS}，仅测前 ${MAX_TARGETS} 个，请精简订阅源`);
@@ -174,6 +188,10 @@ export function useLiveProbe() {
           const index = nextChunk++;
           if (index >= chunks.length) return;
           const chunk = chunks[index];
+          const chunkHeaders: Record<string, { referrer?: string; userAgent?: string }> = {};
+          for (const u of chunk) {
+            if (headersByUrl[u]) chunkHeaders[u] = headersByUrl[u];
+          }
           const received = new Set<string>();
           try {
             await api.liveProbeStream(
@@ -194,7 +212,8 @@ export function useLiveProbe() {
                 done++;
                 scheduleFlush();
               },
-              controller.signal
+              controller.signal,
+              chunkHeaders
             );
           } catch {
             // 整批失败/被取消：不写缓存，保持待测状态以便下次重试

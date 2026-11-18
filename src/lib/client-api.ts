@@ -280,14 +280,21 @@ export const api = {
     return `/api/live/playlist?${sp.toString()}`;
   },
 
-  /** 批量测活：分片级探测频道可达性与延迟（单批最多 50 条） */
-  liveProbe: (urls: string[], signal?: AbortSignal) =>
+  /** 直播测活自定义请求头（如防盗链 Referer / User-Agent） */
+  liveProbe: (
+    urls: string[],
+    signal?: AbortSignal,
+    headers?: Record<string, { referrer?: string; userAgent?: string }>
+  ) =>
     request<{ results: LiveProbeResult[] }>(
       '/api/live/probe',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ urls }),
+        body: JSON.stringify({
+          urls,
+          ...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
+        }),
         signal,
       }
     ),
@@ -299,12 +306,16 @@ export const api = {
   liveProbeStream: async (
     urls: string[],
     onResult: (result: LiveProbeResult) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    headers?: Record<string, { referrer?: string; userAgent?: string }>
   ): Promise<void> => {
     const res = await fetch('/api/live/probe?stream=1', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ urls }),
+      body: JSON.stringify({
+        urls,
+        ...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
+      }),
       signal,
     });
     throwForAuthStatus(res);

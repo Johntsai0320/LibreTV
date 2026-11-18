@@ -65,6 +65,22 @@ describe('rewriteM3u8', () => {
     const input = 'https://a.ts';
     expect(rewriteM3u8(input, BASE, 6)).toBe(input);
   });
+
+  it('帶入 suffix 時保留防盜鏈參數到分片與 URI 屬性', () => {
+    const suffix = '&ref=' + encodeURIComponent('https://mov3.co/') + '&ua=CustomUA';
+    const input = [
+      '#EXTM3U',
+      '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"',
+      '720p/seg1.ts',
+    ].join('\n');
+    const out = rewriteM3u8(input, BASE, 0, '/api/live/stream?url=', suffix);
+    expect(out).toContain(
+      'URI="/api/live/stream?url=' + encodeURIComponent('https://cdn.example.com/live/key.bin') + suffix + '"'
+    );
+    expect(out).toContain(
+      '/api/live/stream?url=' + encodeURIComponent('https://cdn.example.com/live/720p/seg1.ts') + suffix
+    );
+  });
 });
 
 describe('isProxiedUri', () => {

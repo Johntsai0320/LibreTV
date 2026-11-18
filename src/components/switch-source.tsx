@@ -4,9 +4,15 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/client-api';
 import type { SourceConfig, SearchResultItem } from '@/lib/types';
-import { buildWatchUrl, cn } from '@/lib/utils';
+import { buildWatchUrl, cn, formatDuration } from '@/lib/utils';
 import { useAppStore, resolveSource } from '@/lib/store';
-import { qualityKey, qualityLabel } from '@/lib/quality';
+import {
+  matchesQualityFilter,
+  QUALITY_FILTER_OPTIONS,
+  qualityKey,
+  qualityLabel,
+  type QualityFilterTier,
+} from '@/lib/quality';
 import { toSimplified } from '@/lib/zh-conv';
 import { useToast } from './toast';
 import { Icon } from './icon';
@@ -67,6 +73,8 @@ export function SwitchSourceModal({
   const tabBarRef = useRef<HTMLDivElement>(null);
   /** Tab 栏左右是否还有内容：没有渐隐提示，用户不知道右边还藏着源 */
   const [tabEdges, setTabEdges] = useState({ left: false, right: false });
+  const [sortMode, setSortMode] = useState<'speed' | 'quality'>('speed');
+  const [qualityFilter, setQualityFilter] = useState<QualityFilterTier>('all');
 
   // 打开时把焦点移入弹窗、Tab 圈闭在弹窗内、关闭后归还焦点
   useFocusTrap(true, panelRef);
@@ -169,14 +177,27 @@ export function SwitchSourceModal({
     if (targets.length > 0) probe(targets);
   }, [phase, candidates, probe]);
 
-  const sorted = useMemo(() => [...candidates].sort((a, b) => {
-    const aCurrent = isCurrentCandidate(a, currentSourceKey, currentVodId);
-    const bCurrent = isCurrentCandidate(b, currentSourceKey, currentVodId);
-    if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
-    const msA = a.ok ? a.ms ?? 99_999 : 99_999;
-    const msB = b.ok ? b.ms ?? 99_999 : 99_999;
-    return msA - msB;
-  }), [candidates, currentSourceKey, currentVodId]);
+  const sorted = useMemo(() => {
+    const heightOf = (c: Candidate) => qualities[qualityKey(c.source.key, c.result.vodId)]?.height ?? 0;
+    const base =
+      qualityFilter === 'all'
+        ? candidates
+        : candidates.filter((c) =>
+            matchesQualityFilter(qualities[qualityKey(c.source.key, c.result.vodId)]?.height, qualityFilter, false)
+          );
+    return [...base].sort((a, b) => {
+      const aCurrent = isCurrentCandidate(a, currentSourceKey, currentVodId);
+      const bCurrent = isCurrentCandidate(b, currentSourceKey, currentVodId);
+      if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
+      if (sortMode === 'quality') {
+        const diff = heightOf(b) - heightOf(a);
+        if (diff !== 0) return diff;
+      }
+      const msA = a.ok ? a.ms ?? 99_999 : 99_999;
+      const msB = b.ok ? b.ms ?? 99_999 : 99_999;
+      return msA - msB;
+    });
+  }, [candidates, currentSourceKey, currentVodId, qualities, sortMode, qualityFilter]);
 
   /**
    * 面板展示的源：优先用户点过的那个；还没点过时先落到「第一个可切换的源」——
@@ -277,7 +298,7 @@ export function SwitchSourceModal({
       >
         <div className="sm:hidden mx-auto mb-3 h-1 w-10 shrink-0 rounded-full bg-line" aria-hidden />
         {/* 标题固定在滚动区之外：比 sticky 更省事，也不会有背景覆盖不到 padding 的缝隙 */}
-        <div className="shrink-0 mb-4 flex items-center justify-between">
+        <div className="shrink-0 mb-3 flex items-center justify-between">
           <div className="min-w-0">
             <h2 className="text-lg font-semibold text-content truncate" title={currentTitle}>
               {currentTitle}
@@ -287,7 +308,7 @@ export function SwitchSourceModal({
                 ? '正在搜索各资源...'
                 : phase === 'testing'
                   ? '正在测试各资源速率...'
-                  : `共 ${sorted.length} 个来源 · ${sorted.filter((c) => c.ok).length} 个可用`}
+                  : `共 ${sorted.length} 个来源${qualityFilter !== 'all' ? ` / 全部 ${candidates.length}` : ''} · ${sorted.filter((c) => c.ok).length} 个可用`}
             </p>
             {phase === 'done' && progress.total > 0 && (
               <p className="text-xs text-faint tabular-nums mt-0.5">
@@ -307,12 +328,69 @@ export function SwitchSourceModal({
           </button>
         </div>
 
+        {phase === 'done' && candidates.length > 0 && (
+          <div className="shrink-0 mb-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-1" role="group" aria-label="换源画质筛选">
+              {QUALITY_FILTER_OPTIONS.map((opt) => {
+                const active = qualityFilter === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => setQualityFilter(opt.value)}
+                    className={cn(
+                      'px-2 py-0.5 rounded-full border transition-colors',
+                      active
+                        ? 'border-accent bg-accent/15 text-accent font-medium'
+                        : 'border-line bg-chip text-muted hover:text-content hover:bg-hover'
+                    )}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex items-center rounded-md border border-line bg-chip p-0.5">
+              <button
+                type="button"
+                aria-pressed={sortMode === 'speed'}
+                onClick={() => setSortMode('speed')}
+                className={cn(
+                  'px-2 py-0.5 rounded transition-colors',
+                  sortMode === 'speed' ? 'bg-surface-raised text-content font-medium shadow-sm' : 'text-muted hover:text-content'
+                )}
+              >
+                按速度
+              </button>
+              <button
+                type="button"
+                aria-pressed={sortMode === 'quality'}
+                onClick={() => setSortMode('quality')}
+                className={cn(
+                  'px-2 py-0.5 rounded transition-colors',
+                  sortMode === 'quality' ? 'bg-surface-raised text-content font-medium shadow-sm' : 'text-muted hover:text-content'
+                )}
+              >
+                按画质
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* 内容区独占剩余高度并自己滚动：标题与拖拽条始终可见，不随内容滚走 */}
         <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden scrollbar-thin">
         {phase !== 'done' ? (
           <LoadingState label={phase === 'searching' ? '搜索各资源中...' : '测速中...'} />
-        ) : sorted.length === 0 ? (
+        ) : candidates.length === 0 ? (
           <EmptyState variant="plain" title="其他点播源未找到同名资源" />
+        ) : sorted.length === 0 ? (
+          <div className="py-8 text-center">
+            <p className="text-sm text-muted mb-3">当前画质筛选条件下没有匹配的可用源</p>
+            <button type="button" className="btn-ghost btn-sm" onClick={() => setQualityFilter('all')}>
+              显示全部画质
+            </button>
+          </div>
         ) : (
           <>
             {/* 横向 Tab：源多时比网格省纵向空间，手机上可直接滑动 */}
@@ -376,6 +454,7 @@ export function SwitchSourceModal({
               const key = candidateKey(c);
               const coverFailed = imgFailed[key] ?? false;
               const qKey = qualityKey(c.source.key, c.result.vodId);
+              const durLabel = formatDuration(qualities[qKey]?.duration ?? c.result.duration);
               return (
                 <div className="mt-3 flex items-start gap-3 p-3 bg-card rounded-lg">
                   <div className="shrink-0 w-20 aspect-[2/3] rounded-md overflow-hidden bg-chip">
@@ -404,7 +483,7 @@ export function SwitchSourceModal({
                         <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-accent/15 text-accent">播放中</span>
                       )}
                     </div>
-                    <div className="mt-2 grid grid-cols-2 gap-2 sm:max-w-[16rem]">
+                    <div className={cn('mt-2 grid gap-2', durLabel ? 'grid-cols-3 sm:max-w-[22rem]' : 'grid-cols-2 sm:max-w-[16rem]')}>
                       <div className="rounded-md bg-chip px-2 py-1.5">
                         <div className="text-[10px] text-faint">速度</div>
                         <div
@@ -422,6 +501,12 @@ export function SwitchSourceModal({
                           {c.episodes ? `${c.episodes} 集` : '无资源'}
                         </div>
                       </div>
+                      {durLabel && (
+                        <div className="rounded-md bg-chip px-2 py-1.5">
+                          <div className="text-[10px] text-faint">时长</div>
+                          <div className="text-xs font-medium text-content tabular-nums">{durLabel}</div>
+                        </div>
+                      )}
                     </div>
                     <div className="mt-2.5 flex flex-wrap items-center gap-2">
                       {isCurrent ? (

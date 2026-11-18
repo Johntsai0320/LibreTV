@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
@@ -8,10 +8,25 @@ import { Header } from '@/components/header';
 import { RecommendSection } from '@/components/douban-section';
 import { DetailModal } from '@/components/detail-modal';
 import { AggregatedCard, aggregateResults } from '@/components/video-card';
+import { useBatchQualityProbe } from '@/components/use-quality-probe';
 import { useAppStore, resolveSource, isInDisabledSubscription, isSourceDisabled } from '@/lib/store';
 import { api } from '@/lib/client-api';
 import { db } from '@/lib/db';
-import type { SearchResultItem, SourceSearchOutcome } from '@/lib/types';
+import {
+  bestGroupHeight,
+  collectUnprobedTargets,
+  matchesQualityFilter,
+  QUALITY_FILTER_OPTIONS,
+  type QualityFilterTier,
+} from '@/lib/quality';
+import {
+  buildCategoryOptions,
+  buildSubTypeOptions,
+  CATEGORY_LABELS,
+  matchesCategoryFilter,
+  type VideoCategory,
+} from '@/lib/category';
+import type { QualityEntry, SearchResultItem, SourceSearchOutcome } from '@/lib/types';
 import { SearchHistoryDropdown, useSearchHistory } from '@/components/search-history';
 import { cn, formatDisableTtl, validateSourceUrl } from '@/lib/utils';
 import { useToast } from '@/components/toast';
@@ -19,12 +34,16 @@ import { EmptyState } from '@/components/states';
 import { Icon } from '@/components/icon';
 import { SiteFooter } from '@/components/site-footer';
 
+const EMPTY_QUALITY_MAP: Record<string, QualityEntry> = {};
+
 /**
  * 首页：搜索（URL ?s= 驱动，可后退/分享）+ 豆瓣推荐。
  * 搜索状态由 React Query 管理，失败源在结果区顶部以非阻塞方式展示。
  */
 /** 搜索结果分批渲染的批大小：一次挂载上千张卡片会明显掉帧 */
 const RESULT_PAGE_SIZE = 60;
+/** 触发筛选或质量排序时自动批量探测的条数上限，避免宽泛搜索一次性发出过多请求 */
+const AUTO_BATCH_PROBE_LIMIT = 120;
 
 export default function HomePage() {
   return (
@@ -204,10 +223,103 @@ function HomeContent() {
   // 跨源同名聚合：同名影片合并为一张卡片，展开后可选择具体来源
   const groups = useMemo(() => aggregateResults(list), [list]);
 
-  // 分批渲染：新一次搜索（groups 变化）时重置回首批
+  const [categoryFilter, setCategoryFilter] = useState<VideoCategory | 'all'>('all');
+  const [subTypeFilter, setSubTypeFilter] = useState<string | 'all'>('all');
+  const [qualityFilter, setQualityFilter] = useState<QualityFilterTier>('all');
+  const [qualitySort, setQualitySort] = useState<'default' | 'best'>('default');
+  const [includeUnknownQuality, setIncludeUnknownQuality] = useState(false);
+  const [qualityEpoch, setQualityEpoch] = useState(0);
+  const batchProbe = useBatchQualityProbe(selectedSources);
+  const trackQuality =
+    qualityFilter !== 'all' || qualitySort === 'best' || batchProbe.running || qualityEpoch > 0;
+  const qualityMap = useAppStore((s) => (trackQuality ? s.qualityMap : EMPTY_QUALITY_MAP));
+
+  useEffect(() => {
+    batchProbe.stop();
+    setQualityEpoch(0);
+    setCategoryFilter('all');
+    setSubTypeFilter('all');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlQuery]);
+
+  const categoryOptions = useMemo(() => buildCategoryOptions(groups), [groups]);
+  const showBroadCategories = categoryOptions.length >= 2;
+  const subTypeOptions = useMemo(() => {
+    // 存在多个大类时：选中某大类后展示其细分类型；仅有单一大类时：直接把细分类型升为主行展示
+    if (showBroadCategories && categoryFilter === 'all' && subTypeFilter === 'all') return [];
+    const opts = buildSubTypeOptions(groups, showBroadCategories ? categoryFilter : 'all');
+    return opts.length >= 2 ? opts : [];
+  }, [groups, showBroadCategories, categoryFilter, subTypeFilter]);
+  const hasCategoryBar = showBroadCategories || subTypeOptions.length >= 2;
+
+  const selectBroadCategory = (cat: VideoCategory | 'all') => {
+    setCategoryFilter(cat);
+    setSubTypeFilter('all');
+  };
+
+  const startBatchProbe = useCallback(
+    (limit?: number) => {
+      const unprobed = collectUnprobedTargets(groups, useAppStore.getState().qualityMap);
+      const targets = typeof limit === 'number' ? unprobed.slice(0, limit) : unprobed;
+      if (targets.length === 0) return;
+      batchProbe.start(targets, () => setQualityEpoch((v) => v + 1));
+    },
+    [groups, batchProbe]
+  );
+
+  const selectQualityFilter = (tier: QualityFilterTier) => {
+    setQualityFilter(tier);
+    if (tier !== 'all' && !batchProbe.running) {
+      startBatchProbe(AUTO_BATCH_PROBE_LIMIT);
+    }
+  };
+
+  const toggleQualitySort = () => {
+    const next = qualitySort === 'default' ? 'best' : 'default';
+    setQualitySort(next);
+    if (next === 'best' && !batchProbe.running) {
+      startBatchProbe(AUTO_BATCH_PROBE_LIMIT);
+    }
+  };
+
+  const hasCategoryFilter = categoryFilter !== 'all' || subTypeFilter !== 'all';
+  const hasQualityFilter = qualityFilter !== 'all';
+
+  const filteredGroups = useMemo(() => {
+    let next = groups;
+    if (hasCategoryFilter) {
+      next = next.filter((g) => matchesCategoryFilter(g, categoryFilter, subTypeFilter));
+    }
+    if (qualityFilter !== 'all') {
+      next = next.filter((g) =>
+        matchesQualityFilter(bestGroupHeight(g.items, qualityMap), qualityFilter, includeUnknownQuality)
+      );
+    }
+    if (qualitySort === 'best') {
+      next = [...next].sort((a, b) => {
+        const ha = bestGroupHeight(a.items, qualityMap) ?? -1;
+        const hb = bestGroupHeight(b.items, qualityMap) ?? -1;
+        return hb - ha;
+      });
+    }
+    return next;
+  }, [groups, hasCategoryFilter, categoryFilter, subTypeFilter, qualityFilter, qualitySort, includeUnknownQuality, qualityMap]);
+
+  const unprobedCount = useMemo(
+    () => collectUnprobedTargets(groups, qualityMap).length,
+    [groups, qualityMap]
+  );
+
+  // 分批渲染：新一次搜索或筛选变化时重置回首批
   const [visibleCount, setVisibleCount] = useState(RESULT_PAGE_SIZE);
-  const visibleGroups = useMemo(() => groups.slice(0, visibleCount), [groups, visibleCount]);
-  useEffect(() => setVisibleCount(RESULT_PAGE_SIZE), [groups]);
+  const visibleGroups = useMemo(
+    () => filteredGroups.slice(0, visibleCount),
+    [filteredGroups, visibleCount]
+  );
+  useEffect(
+    () => setVisibleCount(RESULT_PAGE_SIZE),
+    [groups, categoryFilter, subTypeFilter, qualityFilter, qualitySort, includeUnknownQuality]
+  );
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -340,7 +452,9 @@ function HomeContent() {
                 ) : (
                   searchQuery.data && (
                     <span className="text-faint">
-                      （{groups.length} 部影片 · {list.length} 条结果{failures.length > 0 && `，${failures.length} 个源失败`}）
+                      （{groups.length} 部影片 · {list.length} 条结果
+                      {(hasCategoryFilter || hasQualityFilter) && ` · 已筛选 ${filteredGroups.length} 部`}
+                      {failures.length > 0 && `，${failures.length} 个源失败`}）
                     </span>
                   )
                 )}
@@ -399,26 +513,250 @@ function HomeContent() {
               )
             ) : list.length > 0 ? (
               <>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 items-start">
-                  {visibleGroups.map((group) => (
-                    <AggregatedCard
-                      key={group.key}
-                      group={group}
-                      sources={selectedSources}
-                      favoriteIds={favoriteIds}
-                      onOpen={(item) => setDetailItem(item)}
-                    />
-                  ))}
-                </div>
-                {groups.length > visibleCount && (
-                  <div className="flex justify-center mt-4">
-                    <button
-                      className="btn-ghost btn-sm"
-                      onClick={() => setVisibleCount((v) => v + RESULT_PAGE_SIZE)}
-                    >
-                      加载更多（还有 {groups.length - visibleCount} 部）
-                    </button>
+                {/* 影片类别筛选栏 */}
+                {hasCategoryBar && (
+                  <div className="mb-2.5 flex flex-col gap-1.5 text-xs">
+                    <div className="flex flex-wrap items-center gap-1" role="group" aria-label="影片类别筛选">
+                      <span className="text-faint mr-1 shrink-0">类别</span>
+                      <button
+                        type="button"
+                        aria-pressed={categoryFilter === 'all' && subTypeFilter === 'all'}
+                        onClick={() => selectBroadCategory('all')}
+                        className={cn(
+                          'px-2.5 py-1 rounded-full border transition-colors',
+                          categoryFilter === 'all' && subTypeFilter === 'all'
+                            ? 'border-accent bg-accent/15 text-accent font-medium'
+                            : 'border-line bg-chip text-muted hover:text-content hover:bg-hover'
+                        )}
+                      >
+                        全部 <span className="opacity-75 tabular-nums">{groups.length}</span>
+                      </button>
+                      {showBroadCategories
+                        ? categoryOptions.map((opt) => {
+                            const active = categoryFilter === opt.value;
+                            return (
+                              <button
+                                key={opt.value}
+                                type="button"
+                                aria-pressed={active}
+                                onClick={() => selectBroadCategory(opt.value)}
+                                className={cn(
+                                  'px-2.5 py-1 rounded-full border transition-colors',
+                                  active
+                                    ? 'border-accent bg-accent/15 text-accent font-medium'
+                                    : 'border-line bg-chip text-muted hover:text-content hover:bg-hover'
+                                )}
+                              >
+                                {opt.label} <span className="opacity-75 tabular-nums">{opt.count}</span>
+                              </button>
+                            );
+                          })
+                        : subTypeOptions.map((opt) => {
+                            const active = subTypeFilter === opt.value;
+                            return (
+                              <button
+                                key={opt.value}
+                                type="button"
+                                aria-pressed={active}
+                                onClick={() => setSubTypeFilter(active ? 'all' : opt.value)}
+                                className={cn(
+                                  'px-2.5 py-1 rounded-full border transition-colors',
+                                  active
+                                    ? 'border-accent bg-accent/15 text-accent font-medium'
+                                    : 'border-line bg-chip text-muted hover:text-content hover:bg-hover'
+                                )}
+                              >
+                                {opt.label} <span className="opacity-75 tabular-nums">{opt.count}</span>
+                              </button>
+                            );
+                          })}
+                    </div>
+
+                    {showBroadCategories && subTypeOptions.length >= 2 && (
+                      <div className="flex flex-wrap items-center gap-1 pl-8" role="group" aria-label="细分类型筛选">
+                        <button
+                          type="button"
+                          aria-pressed={subTypeFilter === 'all'}
+                          onClick={() => setSubTypeFilter('all')}
+                          className={cn(
+                            'px-2 py-0.5 rounded-full border text-[11px] transition-colors',
+                            subTypeFilter === 'all'
+                              ? 'border-accent bg-accent/15 text-accent font-medium'
+                              : 'border-line bg-chip text-muted hover:text-content hover:bg-hover'
+                          )}
+                        >
+                          全部{categoryFilter === 'all' ? '类型' : CATEGORY_LABELS[categoryFilter]}
+                        </button>
+                        {subTypeOptions.map((opt) => {
+                          const active = subTypeFilter === opt.value;
+                          return (
+                            <button
+                              key={opt.value}
+                              type="button"
+                              aria-pressed={active}
+                              onClick={() => setSubTypeFilter(active ? 'all' : opt.value)}
+                              className={cn(
+                                'px-2 py-0.5 rounded-full border text-[11px] transition-colors',
+                                active
+                                  ? 'border-accent bg-accent/15 text-accent font-medium'
+                                  : 'border-line bg-chip text-muted hover:text-content hover:bg-hover'
+                              )}
+                            >
+                              {opt.label} <span className="opacity-75 tabular-nums">{opt.count}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
+                )}
+
+                {/* 画质筛选与排序栏 */}
+                <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
+                  <div className="flex flex-wrap items-center gap-1" role="group" aria-label="画质筛选">
+                    {QUALITY_FILTER_OPTIONS.map((opt) => {
+                      const active = qualityFilter === opt.value;
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => selectQualityFilter(opt.value)}
+                          className={cn(
+                            'px-2.5 py-1 rounded-full border transition-colors',
+                            active
+                              ? 'border-accent bg-accent/15 text-accent font-medium'
+                              : 'border-line bg-chip text-muted hover:text-content hover:bg-hover'
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="ml-auto flex flex-wrap items-center gap-2">
+                    {qualityFilter !== 'all' && (
+                      <label className="flex items-center gap-1.5 text-muted cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          className="h-3.5 w-3.5 accent-[#2563eb]"
+                          checked={includeUnknownQuality}
+                          onChange={(e) => setIncludeUnknownQuality(e.target.checked)}
+                        />
+                        包含未探测
+                      </label>
+                    )}
+
+                    <button
+                      type="button"
+                      aria-pressed={qualitySort === 'best'}
+                      onClick={toggleQualitySort}
+                      className={cn(
+                        'px-2.5 py-1 rounded-md border transition-colors',
+                        qualitySort === 'best'
+                          ? 'border-accent bg-accent/15 text-accent font-medium'
+                          : 'border-line bg-chip text-muted hover:text-content hover:bg-hover'
+                      )}
+                    >
+                      {qualitySort === 'best' ? '画质优先 ✓' : '按画质排序'}
+                    </button>
+
+                    {batchProbe.running ? (
+                      <button
+                        type="button"
+                        onClick={batchProbe.stop}
+                        className="px-2.5 py-1 rounded-md border border-line bg-chip text-muted hover:text-content hover:bg-hover tabular-nums"
+                      >
+                        探测画质中 {batchProbe.done}/{batchProbe.total} · 停止
+                      </button>
+                    ) : (
+                      unprobedCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => startBatchProbe()}
+                          className="px-2.5 py-1 rounded-md border border-line bg-chip text-muted hover:text-content hover:bg-hover tabular-nums"
+                          title="批量探测当前搜索结果各来源的最高画质"
+                        >
+                          探测画质（{unprobedCount}）
+                        </button>
+                      )
+                    )}
+                  </div>
+                </div>
+
+                {filteredGroups.length === 0 ? (
+                  <div className="border border-dashed border-line rounded-xl p-8 text-center">
+                    <p className="text-sm text-content font-medium mb-1">当前筛选条件下暂无匹配影片</p>
+                    <p className="text-xs text-faint mb-4">
+                      {hasQualityFilter && unprobedCount > 0
+                        ? `还有 ${unprobedCount} 个片源未探测画质，可放宽类别或画质条件，或继续探测其余片源。`
+                        : '可尝试放宽类别或画质筛选条件，查看全部搜索结果。'}
+                    </p>
+                    <div className="flex flex-wrap justify-center gap-2">
+                      {hasCategoryFilter && (
+                        <button
+                          type="button"
+                          className="btn-primary btn-sm"
+                          onClick={() => selectBroadCategory('all')}
+                        >
+                          显示全部类别
+                        </button>
+                      )}
+                      {hasQualityFilter && (
+                        <button
+                          type="button"
+                          className={hasCategoryFilter ? 'btn-ghost btn-sm' : 'btn-primary btn-sm'}
+                          onClick={() => setQualityFilter('all')}
+                        >
+                          显示全部画质
+                        </button>
+                      )}
+                      {hasQualityFilter && !includeUnknownQuality && (
+                        <button
+                          type="button"
+                          className="btn-ghost btn-sm"
+                          onClick={() => setIncludeUnknownQuality(true)}
+                        >
+                          包含未探测影片
+                        </button>
+                      )}
+                      {hasQualityFilter && unprobedCount > 0 && !batchProbe.running && (
+                        <button
+                          type="button"
+                          className="btn-ghost btn-sm"
+                          onClick={() => startBatchProbe()}
+                        >
+                          探测其余画质（{unprobedCount}）
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 items-start">
+                      {visibleGroups.map((group) => (
+                        <AggregatedCard
+                          key={group.key}
+                          group={group}
+                          sources={selectedSources}
+                          favoriteIds={favoriteIds}
+                          qualityEpoch={qualityEpoch}
+                          onOpen={(item) => setDetailItem(item)}
+                        />
+                      ))}
+                    </div>
+                    {filteredGroups.length > visibleCount && (
+                      <div className="flex justify-center mt-4">
+                        <button
+                          className="btn-ghost btn-sm"
+                          onClick={() => setVisibleCount((v) => v + RESULT_PAGE_SIZE)}
+                        >
+                          加载更多（还有 {filteredGroups.length - visibleCount} 部）
+                        </button>
+                      </div>
+                    )}
+                  </>
                 )}
               </>
             ) : isSearching ? (

@@ -272,6 +272,50 @@ export function resolveSegments(mark: SkipMark | undefined, duration: number): R
   return result;
 }
 
+/** 全局「片头 / 开头广告默认跳过秒数」预设档位（0 表示关闭） */
+export const OPENING_SKIP_PRESETS = [0, 10, 15, 20, 30, 45, 60, 90] as const;
+export const MAX_DEFAULT_OPENING_SECONDS = 600;
+export const MIN_VIDEO_FOR_DEFAULT_OPENING_SECONDS = 60;
+export const DEFAULT_OPENING_MIN_DURATION_RATIO = 2;
+
+/** 归一化全局默认跳过片头秒数：合法整数范围 [3, 600]，其余按 0（关闭）处理 */
+export function normalizeDefaultOpeningSeconds(value: unknown): number {
+  if (!isFiniteNumber(value)) return 0;
+  const rounded = Math.round(value);
+  if (rounded < MIN_SEGMENT_SECONDS) return 0;
+  return Math.min(MAX_DEFAULT_OPENING_SECONDS, rounded);
+}
+
+/**
+ * 合并「单剧标记」与「全局片头/开头广告默认跳过秒数」。
+ *
+ * 优先级：
+ * 1. 本剧显式关闭（`mark.enabled === false`）→ 整体不生效（含全局默认片头）；
+ * 2. 本剧已标过 opening → 采用单剧精确边界；
+ * 3. 本剧未标 opening 且全局 `defaultOpeningSeconds >= 3` → 当本集总长足够长
+ *    （≥ max(60s, opening * 2) 且不贴近结尾/已有的中段/片尾）时，补入 `[0, opening]`。
+ */
+export function resolveEffectiveSegments(
+  mark: SkipMark | undefined,
+  duration: number,
+  defaultOpeningSeconds = 0
+): ResolvedSegment[] {
+  if (mark?.enabled === false) return [];
+  const segments = resolveSegments(mark, duration);
+  const opening = normalizeDefaultOpeningSeconds(defaultOpeningSeconds);
+  if (opening === 0) return segments;
+  if (segments.some((s) => s.type === 'opening')) return segments;
+  if (!isFiniteNumber(duration) || duration <= 0) return segments;
+  const minDuration = Math.max(
+    MIN_VIDEO_FOR_DEFAULT_OPENING_SECONDS,
+    opening * DEFAULT_OPENING_MIN_DURATION_RATIO
+  );
+  if (duration < minDuration || opening > duration - END_GUARD_SECONDS) return segments;
+  const first = segments[0];
+  if (first && first.start - opening < MIN_SEGMENT_GAP_SECONDS) return segments;
+  return [{ type: 'opening', start: 0, end: opening }, ...segments];
+}
+
 /** 当前位置是否落在某个跳过片段内（用于显示「跳过」按钮与自动跳转） */
 export function findActiveSegment(
   segments: ResolvedSegment[],

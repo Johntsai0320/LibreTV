@@ -157,10 +157,32 @@ export function stripLeadAdGroup(m3u8Content: string): string {
  * （实测：`/video/adjump/time/….ts`，"adjump" = ad jump），与正片分片
  * 的命名完全不同——这是比时长/位置可靠得多的识别信号。
  */
-const AD_URL_PATTERN = /adjump|advert|\/ads?\//i;
+const AD_URL_PATTERN = /adjump|advert|\/ads?\/|\/ad[-_]/i;
 
 function looksLikeAdUrl(line: string): boolean {
   return AD_URL_PATTERN.test(line.trim());
+}
+
+/** 仅丢弃广告组內的分片与其随附标签，保留全局变量标签（#EXTM3U/#EXT-X-TARGETDURATION）与 KEY/MAP */
+function markAdBodyForDrop(lines: string[], from: number, to: number, drop: boolean[]): void {
+  const isSegment = (l: string) => {
+    const t = l.trim();
+    return t !== '' && !t.startsWith('#');
+  };
+  let bodyStart = -1;
+  for (let i = from; i < to; i++) {
+    const t = lines[i].trim();
+    if (t.startsWith('#EXTINF:') || t.startsWith('#EXT-X-BYTERANGE:') || isSegment(lines[i])) {
+      bodyStart = i;
+      break;
+    }
+  }
+  if (bodyStart < 0) return;
+  for (let i = bodyStart; i < to; i++) {
+    const t = lines[i].trim();
+    if (t.startsWith('#EXT-X-KEY') || t.startsWith('#EXT-X-MAP')) continue;
+    drop[i] = true;
+  }
 }
 
 /**
@@ -168,6 +190,7 @@ function looksLikeAdUrl(line: string): boolean {
  * 保守判定：段内**全部分片**都命中广告 URL 特征才整段剔除——只要混入一个
  * 正片分片就放过，避免按时长猜测带来的误伤（正常分段与中插广告时长重叠）。
  * 剔除时保留段前那个 DISCONTINUITY 作正片分段边界，因此不会出现双标记；
+ * 同时覆盖「首个 DISCONTINUITY 之前的首组」片头广告（后续还有分段时）；
  * 段内 EXT-X-KEY / EXT-X-MAP 与片头逻辑同理保留。
  */
 function stripMarkedAdGroups(m3u8Content: string): string {
@@ -179,33 +202,83 @@ function stripMarkedAdGroups(m3u8Content: string): string {
     return t !== '' && !t.startsWith('#');
   };
 
+  const groups = scanGroups(lines, isDisc, isSegment);
+  if (groups.length < 2) return m3u8Content;
+
   const drop = new Array<boolean>(lines.length).fill(false);
-  let i = 0;
-  while (i < lines.length) {
-    if (!isDisc(lines[i])) {
-      i += 1;
-      continue;
-    }
-    let j = i + 1;
-    let count = 0;
+  for (let k = 0; k < groups.length; k++) {
+    const g = groups[k];
+    if (g.count === 0) continue;
+    // 首组之后必须还有正片分片才能剔除，避免整条流只剩空壳
+    if (k === 0 && !groups.slice(1).some((other) => other.count > 0)) continue;
     let allAd = true;
-    while (j < lines.length && !isDisc(lines[j])) {
-      if (isSegment(lines[j])) {
-        count += 1;
-        if (!looksLikeAdUrl(lines[j])) allAd = false;
+    for (let i = g.start; i < g.end; i++) {
+      if (isSegment(lines[i]) && !looksLikeAdUrl(lines[i])) {
+        allAd = false;
+        break;
       }
-      j += 1;
     }
-    if (count > 0 && allAd) {
-      drop[i] = true;
-      for (let k = i + 1; k < j; k++) {
-        const t = lines[k].trim();
+    if (!allAd) continue;
+    if (g.discLine >= 0) {
+      drop[g.discLine] = true;
+      for (let i = g.start; i < g.end; i++) {
+        const t = lines[i].trim();
         if (t.startsWith('#EXT-X-KEY') || t.startsWith('#EXT-X-MAP')) continue;
-        drop[k] = true;
+        drop[i] = true;
       }
+    } else {
+      markAdBodyForDrop(lines, g.start, g.end, drop);
     }
-    i = j;
   }
+  if (!drop.some(Boolean)) return m3u8Content;
+  return lines.filter((_, idx) => !drop[idx]).join('\n');
+}
+
+/**
+ * 剔除「首个 DISCONTINUITY 之前」的片头插入广告段：
+ * 部分采集站把片头广告直接放在首分片处、广告播完后再插一个 #EXT-X-DISCONTINUITY 切回正片
+ * （此时首分片前没有 DISCONTINUITY，stripLeadAdGroup 无法覆盖）。
+ *
+ * 保守判定（全部满足才剔除）：
+ * 1. 存在后续分段，且组数 ≥ 4 时首组大小未与其余组中位数同构（避开周期性分片封装）；
+ * 2. 首组时长 ≤ 90s 且分片数 ≤ 20；
+ * 3. 后续正片总时长 ≥ 120s 且至少为首组时长的 3 倍（避免误伤短测试流或两半拆分流）。
+ */
+export function stripPreDiscOpeningAdGroup(m3u8Content: string): string {
+  if (!m3u8Content) return '';
+  const lines = m3u8Content.split('\n');
+  const isDisc = (l: string) => l.trim() === '#EXT-X-DISCONTINUITY';
+  const isSegment = (l: string) => {
+    const t = l.trim();
+    return t !== '' && !t.startsWith('#');
+  };
+
+  const groups = scanGroups(lines, isDisc, isSegment);
+  if (groups.length < 2) return m3u8Content;
+  const g0 = groups[0];
+  if (g0.count === 0 || g0.count > LEAD_AD_MAX_SEGMENTS) return m3u8Content;
+  if (g0.seconds <= 0 || g0.seconds > LEAD_AD_MAX_SECONDS) return m3u8Content;
+
+  const rest = groups.slice(1);
+  if (groups.length >= 4) {
+    const sorted = rest.map((g) => g.count).sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    if (Math.abs(g0.count - median) <= Math.max(3, median * 0.5)) return m3u8Content;
+  }
+
+  let restSeconds = 0;
+  let restCount = 0;
+  for (const g of rest) {
+    restSeconds += g.seconds;
+    restCount += g.count;
+  }
+  if (restCount === 0) return m3u8Content;
+  if (restSeconds < INTERSTITIAL_NEIGHBOR_MIN_SECONDS || restSeconds < g0.seconds * 3) {
+    return m3u8Content;
+  }
+
+  const drop = new Array<boolean>(lines.length).fill(false);
+  markAdBodyForDrop(lines, g0.start, g0.end, drop);
   if (!drop.some(Boolean)) return m3u8Content;
   return lines.filter((_, idx) => !drop[idx]).join('\n');
 }
@@ -302,12 +375,17 @@ function stripLeadingDisc(content: string): string {
 
 /**
  * 广告过滤总入口（播放 loader 与下载解析共用），按可靠度依次：
- * 1. URL 特征中插段（adjump 等，任意位置）；
+ * 1. URL 特征广告段（adjump 等，含首个 DISCONTINUITY 前与任意中插）；
  * 2. 长正片段之间的超短插入段（纯时长型中插广告）；
- * 3. 片头无特征插入段（dytt 式，位置+短小启发式）；
+ * 3. 首分片无前导标记的片头广告段（首组短段 + 长正片）；
+ * 4. 片头无特征插入段（dytt 式，首个 DISCONTINUITY 后的短插入段）；
  * 最后统一清掉首分片前失去语义的 DISCONTINUITY。
  */
 export function stripAdGroups(m3u8Content: string): string {
   if (!m3u8Content) return '';
-  return stripLeadingDisc(stripLeadAdGroup(stripInterstitialAdGroups(stripMarkedAdGroups(m3u8Content))));
+  return stripLeadingDisc(
+    stripLeadAdGroup(
+      stripPreDiscOpeningAdGroup(stripInterstitialAdGroups(stripMarkedAdGroups(m3u8Content)))
+    )
+  );
 }

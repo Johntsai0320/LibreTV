@@ -643,3 +643,26 @@ describe('片源星标收藏（点播与直播）', () => {
     expect(persisted.liveSourceFavorites).toEqual(['https://live.example.com/list.m3u']);
   });
 });
+
+describe('默认跳过开头广告设置项', () => {
+  it('autoSkipOpeningSeconds 默认关闭（0）且支持规范化写入与持久化', () => {
+    expect(store().autoSkipOpeningSeconds).toBe(0);
+
+    store().updateSettings({ autoSkipOpeningSeconds: 15 });
+    expect(store().autoSkipOpeningSeconds).toBe(15);
+
+    // 低于最小时长会被归零，超过上限会被截断到 600
+    store().updateSettings({ autoSkipOpeningSeconds: 2 });
+    expect(store().autoSkipOpeningSeconds).toBe(0);
+
+    store().updateSettings({ autoSkipOpeningSeconds: 999 });
+    expect(store().autoSkipOpeningSeconds).toBe(600);
+
+    const options = useAppStore.persist.getOptions() as unknown as {
+      partialize: (s: unknown) => Record<string, unknown>;
+    };
+    expect(options.partialize(store()).autoSkipOpeningSeconds).toBe(600);
+    store().updateSettings({ autoSkipOpeningSeconds: 0 });
+  });
+});
+

@@ -18,7 +18,7 @@ import { prefersTouchPointer } from '@/lib/touch-pointer';
 import {
   findActiveSegment,
   findCrossedEnding,
-  resolveSegments,
+  resolveEffectiveSegments,
   SEGMENT_COLORS,
   SEGMENT_LABELS,
   type ResolvedSegment,
@@ -69,6 +69,11 @@ interface PlayerShellProps {
    */
   autoSkipSegments: boolean;
   /**
+   * 全局片头/开头广告默认跳过秒数（0 表示关闭）。
+   * 本剧未单独标过片头且未在本剧关闭跳过时生效。
+   */
+  autoSkipOpeningSeconds?: number;
+  /**
    * 音量放大（Web Audio 增益链）：默认 false。
    * 关闭时完全不接入音频链路；播放中改开关由 setBoost 走「直通/增益」切换。
    */
@@ -102,6 +107,8 @@ interface PlayerShellProps {
    * 下次搜索同一部剧就能直接显示画质，不必再探测。
    */
   onQuality?: (height: number) => void;
+  /** 实测视频总时长（秒），用于顶部展示与回写搜索卡片时长缓存 */
+  onDuration?: (duration: number) => void;
   /** 恢复策略判源不可用（重试耗尽/格式硬失败）时回调：父级弹出换源面板 */
   onRequestSwitchSource?: (reason: string) => void;
   /** 控制条上的上一集 / 下一集：不在播放器里也能切集，省得回到页面按钮 */
@@ -118,6 +125,7 @@ export function PlayerShell({
   autoplayNext,
   skipMark,
   autoSkipSegments,
+  autoSkipOpeningSeconds = 0,
   volumeBoost,
   miniProgressBar = true,
   pendingStart,
@@ -132,6 +140,7 @@ export function PlayerShell({
   onEnded,
   onPause,
   onQuality,
+  onDuration,
   onRequestSwitchSource,
   onPrevEpisode,
   onNextEpisode,
@@ -151,23 +160,30 @@ export function PlayerShell({
 
   // 始终持有最新 props/回调，避免重建播放器
   const propsRef = useRef({
-    url, title, adFilter, autoplayNext, skipMark, autoSkipSegments, volumeBoost, miniProgressBar,
+    url, title, adFilter, autoplayNext, skipMark, autoSkipSegments, autoSkipOpeningSeconds, volumeBoost, miniProgressBar,
     pendingStart, onPendingStart, onPlayerApi, onRecordSegment,
     episodeKey, nextUrl, nextEpisodeKey,
-    getRestorePosition, onTimeUpdate, onEnded, onPause, onQuality, onRequestSwitchSource,
+    getRestorePosition, onTimeUpdate, onEnded, onPause, onQuality, onDuration, onRequestSwitchSource,
     onPrevEpisode, onNextEpisode, hasPrevEpisode, hasNextEpisode,
   });
   propsRef.current = {
-    url, title, adFilter, autoplayNext, skipMark, autoSkipSegments, volumeBoost, miniProgressBar,
+    url, title, adFilter, autoplayNext, skipMark, autoSkipSegments, autoSkipOpeningSeconds, volumeBoost, miniProgressBar,
     pendingStart, onPendingStart, onPlayerApi, onRecordSegment,
     episodeKey, nextUrl, nextEpisodeKey,
-    getRestorePosition, onTimeUpdate, onEnded, onPause, onQuality, onRequestSwitchSource,
+    getRestorePosition, onTimeUpdate, onEnded, onPause, onQuality, onDuration, onRequestSwitchSource,
     onPrevEpisode, onNextEpisode, hasPrevEpisode, hasNextEpisode,
   };
 
   /** 上报实测画质：多次上报取大值由调用方决定，这里只管把拿到的高度传出去 */
   const reportQuality = (height: number) => {
     if (height > 0) propsRef.current.onQuality?.(height);
+  };
+
+  /** 上报实测视频时长（秒） */
+  const reportDuration = (duration: number) => {
+    if (Number.isFinite(duration) && duration >= 1) {
+      propsRef.current.onDuration?.(Math.round(duration));
+    }
   };
 
   // 跨集共享、每次换集重置的播放链路状态
@@ -282,7 +298,11 @@ export function PlayerShell({
     progress.querySelectorAll('[data-skip-segment]').forEach((el: Element) => el.remove());
     const duration = art.duration;
     if (!Number.isFinite(duration) || duration <= 0) return;
-    const segments = resolveSegments(propsRef.current.skipMark, duration);
+    const segments = resolveEffectiveSegments(
+      propsRef.current.skipMark,
+      duration,
+      propsRef.current.autoSkipOpeningSeconds
+    );
     for (const seg of segments) {
       const el = document.createElement('div');
       el.dataset.skipSegment = '1';
@@ -671,8 +691,16 @@ export function PlayerShell({
       const height = art.video?.videoHeight;
       if (typeof height === 'number' && height > 0) reportQuality(height);
     };
+    const reportVideoDuration = () => {
+      const duration = art.duration;
+      if (typeof duration === 'number' && Number.isFinite(duration) && duration >= 1) {
+        reportDuration(duration);
+      }
+    };
     art.on('video:loadedmetadata', reportVideoHeight);
     art.on('video:canplay', reportVideoHeight);
+    art.on('video:loadedmetadata', reportVideoDuration);
+    art.on('video:durationchange', reportVideoDuration);
     // resize 不在 ArtPlayer 的视频事件转发表里，直接挂原生事件
     art.video?.addEventListener('resize', reportVideoHeight);
 
@@ -691,6 +719,7 @@ export function PlayerShell({
       // 否则「视频轨挂了、音频轨先播出来」时会清掉遮罩，留下黑屏假死态
       if (mediaHealthyRef.current) setError('');
       reportVideoHeight();
+      reportVideoDuration();
     });
     art.on('video:error', () => {
       mediaHealthyRef.current = false;
@@ -724,7 +753,7 @@ export function PlayerShell({
       const duration = art.duration;
       const previous = lastSampleRef.current;
       lastSampleRef.current = current;
-      const segments = resolveSegments(p.skipMark, duration);
+      const segments = resolveEffectiveSegments(p.skipMark, duration, p.autoSkipOpeningSeconds);
 
       // 结尾片段：只认连续播放越过起点；拖动进度条、刚写入标记、进度恢复造成的大跳变
       // 都不自动结束，只显示按钮由用户决定。是否结束由合并后的 autoSkipSegments 控制
@@ -772,7 +801,11 @@ export function PlayerShell({
       // 暂停中 seek 不会触发 timeupdate，这里也同步刷新按钮的显隐。
       const current = art.currentTime;
       lastSampleRef.current = current;
-      const segments = resolveSegments(propsRef.current.skipMark, art.duration);
+      const segments = resolveEffectiveSegments(
+        propsRef.current.skipMark,
+        art.duration,
+        propsRef.current.autoSkipOpeningSeconds
+      );
       const active = findActiveSegment(segments, current);
       const prompt =
         active && !handledSegmentsRef.current.has(segmentKey(active)) ? active : null;
@@ -1035,13 +1068,13 @@ export function PlayerShell({
     if (!art) return;
     const current = art.currentTime;
     lastSampleRef.current = Number.isFinite(current) ? current : 0;
-    const segments = resolveSegments(skipMark, art.duration);
+    const segments = resolveEffectiveSegments(skipMark, art.duration, autoSkipOpeningSeconds);
     const active = findActiveSegment(segments, current);
     const prompt =
       active && !handledSegmentsRef.current.has(segmentKey(active)) ? active : null;
     updateSkipPrompt(prompt);
     renderSkipMarks();
-  }, [skipMark]);
+  }, [skipMark, autoSkipOpeningSeconds]);
 
   // —— 换集：仅切换 HLS 源，不重建播放器（保留网页全屏等状态） ——
   const firstUrlRef = useRef(true);

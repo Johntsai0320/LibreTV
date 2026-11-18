@@ -43,6 +43,7 @@ function getSharedQueue(): ProbeQueue {
 
 const toEntry = (result: QualityProbeResult): QualityEntry => ({
   height: result.height,
+  ...(typeof result.duration === 'number' && result.duration > 0 ? { duration: result.duration } : {}),
   from: 'probe',
   error: result.error,
   timestamp: Date.now(),
@@ -168,7 +169,26 @@ export function useQualityProbe(sources?: SourceConfig[]) {
     setTargets(list);
     if (list.length === 0) return;
     const cached = readQualities(list.map((i) => ({ sourceKey: i.sourceKey, vodId: i.vodId })));
-    if (Object.keys(cached).length > 0) setQualities((prev) => ({ ...cached, ...prev }));
+    const cachedEntries = Object.entries(cached);
+    if (cachedEntries.length === 0) return;
+    setQualities((prev) => {
+      let changed = false;
+      for (const [k, entry] of cachedEntries) {
+        const cur = prev[k];
+        if (
+          !cur ||
+          cur.height !== entry.height ||
+          cur.duration !== entry.duration ||
+          cur.error !== entry.error ||
+          cur.from !== entry.from ||
+          cur.timestamp !== entry.timestamp
+        ) {
+          changed = true;
+          break;
+        }
+      }
+      return changed ? { ...prev, ...cached } : prev;
+    });
   }, []);
 
   const probe = useCallback(
@@ -274,14 +294,14 @@ export function useQualityProbe(sources?: SourceConfig[]) {
   probeRef.current = probe;
 
   /**
-   * 经全局队列探测（单源卡片进入视口）。
+   * 经全局队列探测（卡片进入视口）。
    * 不阻塞渲染、不打断直连批次：队列自己限并发，这里只负责把结果摊到本卡片上。
    */
   const probeQueued = useCallback(
-    (items: QualityProbeTarget[]) => {
+    (items: QualityProbeTarget[], opts?: { preserveTargets?: boolean }) => {
       const list = dedupeByKey(items);
       if (list.length === 0) return;
-      setTargets(list);
+      if (!opts?.preserveTargets) setTargets(list);
 
       const cached = readQualities(list.map((i) => ({ sourceKey: i.sourceKey, vodId: i.vodId })));
       setQualities((prev) => ({ ...cached, ...prev }));
@@ -365,3 +385,112 @@ export function useQualityProbe(sources?: SourceConfig[]) {
 
   return { qualities, probing, progress, prime, probe, probeQueued, retry };
 }
+
+export interface BatchQualityProbeState {
+  running: boolean;
+  total: number;
+  done: number;
+  start: (items: QualityProbeTarget[], onBatchComplete?: () => void) => void;
+  stop: () => void;
+}
+
+/**
+ * 批量画质探测控制器（搜索结果画质筛选 / 「探测全部画质」使用）。
+ * 复用共享限流队列（并发 2、每批 8 条），按批次渐进回写全局缓存，避免压垮源站。
+ */
+export function useBatchQualityProbe(sources?: SourceConfig[]): BatchQualityProbeState {
+  const [running, setRunning] = useState(false);
+  const [total, setTotal] = useState(0);
+  const [done, setDone] = useState(0);
+  const epochRef = useRef(0);
+  const activeKeysRef = useRef<string[]>([]);
+  const mountedRef = useRef(true);
+
+  const stop = useCallback(() => {
+    epochRef.current += 1;
+    if (activeKeysRef.current.length > 0) {
+      getSharedQueue().cancel(activeKeysRef.current);
+      activeKeysRef.current = [];
+    }
+    if (mountedRef.current) setRunning(false);
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      epochRef.current += 1;
+      if (activeKeysRef.current.length > 0) {
+        getSharedQueue().cancel(activeKeysRef.current);
+        activeKeysRef.current = [];
+      }
+    };
+  }, []);
+
+  const start = useCallback(
+    (items: QualityProbeTarget[], onBatchComplete?: () => void) => {
+      stop();
+      const deduped = dedupeByKey(items);
+      const cached = readQualities(deduped.map((i) => ({ sourceKey: i.sourceKey, vodId: i.vodId })));
+      const mapped: Array<{ key: string; item: QualityProbeItem }> = [];
+      for (const target of deduped) {
+        const key = qualityKey(target.sourceKey, target.vodId);
+        if (cached[key]) continue;
+        const source =
+          sources?.find((s) => s.key === target.sourceKey) ??
+          (target.sourceUrl
+            ? ({
+                key: target.sourceKey,
+                name: target.sourceName ?? target.sourceKey,
+                url: target.sourceUrl,
+              } as SourceConfig)
+            : undefined);
+        if (source) mapped.push({ key, item: { source, id: target.vodId } });
+      }
+      if (mapped.length === 0) {
+        setTotal(0);
+        setDone(0);
+        setRunning(false);
+        return;
+      }
+
+      const epoch = ++epochRef.current;
+      activeKeysRef.current = mapped.map((m) => m.key);
+      setTotal(mapped.length);
+      setDone(0);
+      setRunning(true);
+
+      const CHUNK_SIZE = 8;
+      const chunks: Array<Array<{ key: string; item: QualityProbeItem }>> = [];
+      for (let i = 0; i < mapped.length; i += CHUNK_SIZE) {
+        chunks.push(mapped.slice(i, i + CHUNK_SIZE));
+      }
+
+      void (async () => {
+        for (const chunk of chunks) {
+          if (epochRef.current !== epoch || !mountedRef.current) return;
+          const results = await getSharedQueue().push(chunk.map((c) => c.item));
+          if (epochRef.current !== epoch || !mountedRef.current) return;
+          const writable: Record<string, QualityEntry> = {};
+          for (const result of Object.values(results)) {
+            if (result.error === '探测已取消') continue;
+            writable[qualityKey(result.sourceKey, result.vodId)] = toEntry(result);
+          }
+          if (Object.keys(writable).length > 0) {
+            useAppStore.getState().setQuality(writable);
+            onBatchComplete?.();
+          }
+          setDone((prev) => Math.min(mapped.length, prev + chunk.length));
+        }
+        if (epochRef.current === epoch && mountedRef.current) {
+          activeKeysRef.current = [];
+          setRunning(false);
+        }
+      })();
+    },
+    [sources, stop]
+  );
+
+  return { running, total, done, start, stop };
+}
+

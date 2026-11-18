@@ -120,16 +120,38 @@ export function mergeQualityEntries(
 
   for (const [key, value] of Object.entries(incoming)) {
     const prev = next[key];
+    const duration = value.duration ?? prev?.duration;
     if (prev?.from === 'play') {
-      if (value.from !== 'play') continue;
+      if (value.from !== 'play') {
+        if (value.duration !== undefined && prev.duration === undefined) {
+          next[key] = { ...prev, duration: value.duration };
+        }
+        continue;
+      }
       const best = Math.max(prev.height ?? 0, value.height ?? 0);
-      next[key] = { from: 'play', height: best || undefined, timestamp: now };
+      next[key] = {
+        from: 'play',
+        height: best || undefined,
+        ...(duration !== undefined ? { duration } : {}),
+        timestamp: now,
+      };
+      continue;
+    }
+    if (prev?.from === 'probe' && prev.height !== undefined && value.from === 'play' && value.height === undefined) {
+      next[key] = {
+        ...prev,
+        ...(duration !== undefined ? { duration } : {}),
+        timestamp: value.timestamp,
+      };
       continue;
     }
     if (prev?.from === 'probe' && value.from === 'probe' && prev.height !== undefined && value.height === undefined) {
+      if (value.duration !== undefined && prev.duration === undefined) {
+        next[key] = { ...prev, duration: value.duration, timestamp: value.timestamp };
+      }
       continue;
     }
-    next[key] = value;
+    next[key] = duration !== undefined && value.duration === undefined ? { ...value, duration } : value;
   }
 
   const overflow = Object.keys(next).length - QUALITY_MAX_ENTRIES;
@@ -257,3 +279,101 @@ export function inferHeightFromBitrate(bandwidth: number): number {
   }
   return 240;
 }
+
+// —— 画质筛选与分组汇总 ——
+
+export type QualityFilterTier = 'all' | '4k' | '2k+' | '1080p+' | '720p+' | 'sd';
+
+export const QUALITY_FILTER_OPTIONS: ReadonlyArray<{ value: QualityFilterTier; label: string }> = [
+  { value: 'all', label: '全部画质' },
+  { value: '4k', label: '4K' },
+  { value: '2k+', label: '2K+' },
+  { value: '1080p+', label: '1080P+' },
+  { value: '720p+', label: '720P+' },
+  { value: 'sd', label: '720P 以下' },
+];
+
+/** 与 qualityLabel 使用相同的 15% 裁边容差，保证显示为 1080P（如 960P 宽银幕）的影片能命中 1080P+ 筛选 */
+const FILTER_MIN_HEIGHT: Record<Exclude<QualityFilterTier, 'all' | 'sd'>, number> = {
+  '4k': Math.round(2160 * (1 - TIER_TOLERANCE)),
+  '2k+': Math.round(1440 * (1 - TIER_TOLERANCE)),
+  '1080p+': Math.round(1080 * (1 - TIER_TOLERANCE)),
+  '720p+': Math.round(720 * (1 - TIER_TOLERANCE)),
+};
+
+/**
+ * 判断视频高度是否满足画质筛选条件。
+ * 尚未拿到高度时由 `includeUnknown` 决定是否保留（默认筛选具体档位时隐藏未探测项，避免 480P 混进 1080P+）。
+ */
+export function matchesQualityFilter(
+  height: number | undefined,
+  filter: QualityFilterTier,
+  includeUnknown = false
+): boolean {
+  if (filter === 'all') return true;
+  if (!height || height <= 0) return includeUnknown;
+  if (filter === 'sd') return height < FILTER_MIN_HEIGHT['720p+'];
+  return height >= FILTER_MIN_HEIGHT[filter];
+}
+
+/** 读取一组来源中已生效（未过期）的最高分辨率高度；全部未知或过期返回 undefined */
+export function bestGroupHeight(
+  items: ReadonlyArray<{ sourceKey: string; vodId: string }>,
+  qualityMap: Record<string, QualityEntry>,
+  now = Date.now()
+): number | undefined {
+  let best: number | undefined;
+  for (const item of items) {
+    const entry = qualityMap[qualityKey(item.sourceKey, item.vodId)];
+    if (!entry || !isQualityEntryFresh(entry, now)) continue;
+    if (typeof entry.height === 'number' && entry.height > 0) {
+      if (best === undefined || entry.height > best) best = entry.height;
+    }
+  }
+  return best;
+}
+
+/** 从搜索分组中收集尚未有有效缓存结论（且不在失败冷却期）的探测目标，按输入顺序去重 */
+export function collectUnprobedTargets<T extends { sourceKey: string; vodId: string }>(
+  groups: ReadonlyArray<{ items: ReadonlyArray<T> }>,
+  qualityMap: Record<string, QualityEntry>,
+  now = Date.now()
+): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const group of groups) {
+    for (const item of group.items) {
+      const key = qualityKey(item.sourceKey, item.vodId);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const entry = qualityMap[key];
+      if (entry && isQualityEntryFresh(entry, now)) continue;
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+/**
+ * 读取一组来源的参考视频时长（秒）：
+ * 优先采用未过期的实测/探测时长（来自播放器或 m3u8 清单），其次回退搜索结果自带的 CMS 时长。
+ */
+export function bestGroupDuration(
+  items: ReadonlyArray<{ sourceKey: string; vodId: string; duration?: number }>,
+  qualityMap: Record<string, QualityEntry>,
+  now = Date.now()
+): number | undefined {
+  let cmsFallback: number | undefined;
+  for (const item of items) {
+    const entry = qualityMap[qualityKey(item.sourceKey, item.vodId)];
+    if (entry && isQualityEntryFresh(entry, now) && typeof entry.duration === 'number' && entry.duration > 0) {
+      return entry.duration;
+    }
+    if (cmsFallback === undefined && typeof item.duration === 'number' && item.duration > 0) {
+      cmsFallback = item.duration;
+    }
+  }
+  return cmsFallback;
+}
+
+

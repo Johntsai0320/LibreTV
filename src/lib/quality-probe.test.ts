@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { probeEpisodeOrder, probeQuality } from './quality-probe';
+import { parseM3u8Duration, probeEpisodeOrder, probeQuality } from './quality-probe';
 import type { SourceConfig } from './types';
 
 const mocks = vi.hoisted(() => ({ fetchUpstream: vi.fn() }));
@@ -324,5 +324,55 @@ seg0.ts
     const result = await probeQuality({ source: { ...SOURCE, url: 'not-a-url' }, id: '123' });
     expect(result.error).toBeDefined();
     expect(result.height).toBeUndefined();
+  });
+
+  it('单码率 m3u8 在探测画质时同步返回播放列表总时长，master playlist 回退 CMS 时长', async () => {
+    currentPlaylist = `#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXTINF:120.4,
+seg0.ts
+#EXTINF:60.2,
+seg1.ts
+#EXT-X-ENDLIST
+`;
+    mocks.fetchUpstream.mockImplementation((url: string) => Promise.resolve(route(url)));
+    const singleResult = await probeQuality({ source: SOURCE, id: '123' });
+    expect(singleResult.duration).toBe(181);
+
+    currentPlaylist = MASTER;
+    mocks.fetchUpstream.mockImplementation((url: string) => {
+      if (url.includes('ac=videolist')) {
+        const body = JSON.stringify({
+          list: [{ vod_id: '123', vod_name: '测试影片', vod_duration: '01:30:00', vod_play_url: `第1集$${PLAYLIST_URL}` }],
+        });
+        return Promise.resolve(new Response(body, { status: 200 }));
+      }
+      return Promise.resolve(route(url));
+    });
+    const masterResult = await probeQuality({ source: SOURCE, id: '123' });
+    expect(masterResult.height).toBe(1080);
+    expect(masterResult.duration).toBe(5400);
+  });
+});
+
+describe('parseM3u8Duration', () => {
+  it('累加完结清单 #EXTINF 并剔除 DISCONTINUITY 广告组', () => {
+    const playlist = `#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXTINF:15.0,
+ad/0.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:600.0,
+main/0.ts
+#EXTINF:600.4,
+main/1.ts
+#EXT-X-ENDLIST
+`;
+    expect(parseM3u8Duration(playlist)).toBe(1200);
+  });
+
+  it('缺少 ENDLIST（直播/未完结清单）或无 EXTINF 返回 undefined', () => {
+    expect(parseM3u8Duration('#EXTM3U\n#EXTINF:10.0,\nseg0.ts\n')).toBeUndefined();
+    expect(parseM3u8Duration('#EXTM3U\n#EXT-X-ENDLIST\n')).toBeUndefined();
   });
 });

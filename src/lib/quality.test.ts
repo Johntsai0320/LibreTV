@@ -2,11 +2,15 @@ import { describe, expect, it } from 'vitest';
 import {
   QUALITY_FAIL_TTL_MS,
   QUALITY_TTL_MS,
+  bestGroupDuration,
+  bestGroupHeight,
+  collectUnprobedTargets,
   describeQualityBadge,
   failureReasonLabel,
   inferHeightFromBitrate,
   isQualityEntryFresh,
   isRetryableTimeout,
+  matchesQualityFilter,
   mergeQualityEntries,
   qualityLabel,
   summarizeQuality,
@@ -363,3 +367,132 @@ describe('isRetryableTimeout', () => {
     expect(isRetryableTimeout(undefined)).toBe(false);
   });
 });
+
+describe('matchesQualityFilter', () => {
+  it('all 档放行全部高度与未知项', () => {
+    expect(matchesQualityFilter(undefined, 'all', false)).toBe(true);
+    expect(matchesQualityFilter(360, 'all', false)).toBe(true);
+    expect(matchesQualityFilter(2160, 'all', false)).toBe(true);
+  });
+
+  it('按容差匹配 4K / 2K+ / 1080P+ / 720P+ / SD，支持 960P 宽银幕归入 1080P+', () => {
+    expect(matchesQualityFilter(2160, '4k')).toBe(true);
+    expect(matchesQualityFilter(1900, '4k')).toBe(true);
+    expect(matchesQualityFilter(1440, '4k')).toBe(false);
+
+    expect(matchesQualityFilter(1440, '2k+')).toBe(true);
+    expect(matchesQualityFilter(2160, '2k+')).toBe(true);
+    expect(matchesQualityFilter(1080, '2k+')).toBe(false);
+
+    expect(matchesQualityFilter(1080, '1080p+')).toBe(true);
+    expect(matchesQualityFilter(960, '1080p+')).toBe(true); // 1920x960 裁边仍算 1080P
+    expect(matchesQualityFilter(720, '1080p+')).toBe(false);
+
+    expect(matchesQualityFilter(720, '720p+')).toBe(true);
+    expect(matchesQualityFilter(680, '720p+')).toBe(true);
+    expect(matchesQualityFilter(480, '720p+')).toBe(false);
+
+    expect(matchesQualityFilter(480, 'sd')).toBe(true);
+    expect(matchesQualityFilter(540, 'sd')).toBe(true);
+    expect(matchesQualityFilter(720, 'sd')).toBe(false);
+  });
+
+  it('未探测或非法高度由 includeUnknown 控制', () => {
+    expect(matchesQualityFilter(undefined, '1080p+', false)).toBe(false);
+    expect(matchesQualityFilter(0, '1080p+', false)).toBe(false);
+    expect(matchesQualityFilter(undefined, '1080p+', true)).toBe(true);
+    expect(matchesQualityFilter(0, 'sd', true)).toBe(true);
+  });
+});
+
+describe('bestGroupHeight 与 collectUnprobedTargets', () => {
+  const T = 1_700_000_000_000;
+
+  it('bestGroupHeight 只取未过期条目的最大高度', () => {
+    const items = [
+      { sourceKey: 's1', vodId: '1' },
+      { sourceKey: 's2', vodId: '2' },
+      { sourceKey: 's3', vodId: '3' },
+    ];
+    const map: Record<string, QualityEntry> = {
+      's1:1': { height: 720, from: 'probe', timestamp: T },
+      's2:2': { height: 2160, from: 'probe', timestamp: T - QUALITY_TTL_MS - 10 }, // 已过期
+      's3:3': { height: 1080, from: 'play', timestamp: T },
+    };
+    expect(bestGroupHeight(items, map, T)).toBe(1080);
+    expect(bestGroupHeight([{ sourceKey: 's2', vodId: '2' }], map, T)).toBeUndefined();
+  });
+
+  it('collectUnprobedTargets 按键去重并跳过有效缓存与失败冷却期内条目', () => {
+    const groups = [
+      {
+        items: [
+          { sourceKey: 's1', vodId: '1' },
+          { sourceKey: 's2', vodId: '2' },
+          { sourceKey: 's3', vodId: '3' },
+        ],
+      },
+      {
+        items: [
+          { sourceKey: 's3', vodId: '3' }, // 重复条目应跳过
+          { sourceKey: 's4', vodId: '4' },
+        ],
+      },
+    ];
+    const map: Record<string, QualityEntry> = {
+      's1:1': { height: 1080, from: 'probe', timestamp: T }, // 有效
+      's2:2': { from: 'probe', error: '超时', timestamp: T - QUALITY_FAIL_TTL_MS + 1000 }, // 冷却中
+    };
+    expect(collectUnprobedTargets(groups, map, T)).toEqual([
+      { sourceKey: 's3', vodId: '3' },
+      { sourceKey: 's4', vodId: '4' },
+    ]);
+
+    // 失败冷却期过后允许重新收集
+    const expiredFail = T + QUALITY_FAIL_TTL_MS + 1000;
+    expect(collectUnprobedTargets(groups, map, expiredFail)).toEqual([
+      { sourceKey: 's2', vodId: '2' },
+      { sourceKey: 's3', vodId: '3' },
+      { sourceKey: 's4', vodId: '4' },
+    ]);
+  });
+});
+
+describe('duration merge & bestGroupDuration', () => {
+  const T = 1_700_000_000_000;
+
+  it('mergeQualityEntries 保留已知时长且实测仅回写时长时不抹掉探测画质', () => {
+    const probed = mergeQualityEntries({}, { k: { height: 1080, from: 'probe', timestamp: T } }, T);
+    const withPlayDuration = mergeQualityEntries(
+      probed,
+      { k: { duration: 2700, from: 'play', timestamp: T + 1000 } },
+      T + 1000
+    );
+    expect(withPlayDuration.k).toMatchObject({ height: 1080, duration: 2700, from: 'probe' });
+
+    const withPlayHeight = mergeQualityEntries(
+      withPlayDuration,
+      { k: { height: 720, from: 'play', timestamp: T + 2000 } },
+      T + 2000
+    );
+    expect(withPlayHeight.k).toMatchObject({ height: 720, duration: 2700, from: 'play' });
+  });
+
+  it('bestGroupDuration 优先取未过期的探测/实测时长，否则回退 CMS 时长', () => {
+    const items = [
+      { sourceKey: 's1', vodId: '1', duration: 1800 },
+      { sourceKey: 's2', vodId: '2', duration: 3600 },
+    ];
+    const freshMap: Record<string, QualityEntry> = {
+      's2:2': { height: 1080, duration: 3650, from: 'probe', timestamp: T },
+    };
+    expect(bestGroupDuration(items, freshMap, T)).toBe(3650);
+
+    const expiredMap: Record<string, QualityEntry> = {
+      's2:2': { height: 1080, duration: 3650, from: 'probe', timestamp: T - QUALITY_TTL_MS - 10 },
+    };
+    expect(bestGroupDuration(items, expiredMap, T)).toBe(1800);
+    expect(bestGroupDuration([{ sourceKey: 's3', vodId: '3' }], {}, T)).toBeUndefined();
+  });
+});
+

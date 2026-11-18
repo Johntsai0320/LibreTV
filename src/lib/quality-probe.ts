@@ -6,6 +6,7 @@ import {
 } from './codec-parse';
 import { cmsRequestHeaders, parseDetail, parseDetailPageHtml } from './cms-parser';
 import { fetchUpstream } from './fetch-utils';
+import { stripAdGroups } from './m3u8';
 import { inferHeightFromBitrate } from './quality';
 import { checkUpstreamAllowed } from './ssrf';
 import type { QualityProbeItem, QualityProbeResult, SourceConfig } from './types';
@@ -26,8 +27,8 @@ import type { QualityProbeItem, QualityProbeResult, SourceConfig } from './types
  * - 有防盗链或要求特殊鉴权的源：请求被拒。
  */
 
-/** m3u8 读取上限：master playlist 通常 < 1KB，媒体列表可能几百 KB，只读够解析的头部 */
-const M3U8_MAX_BYTES = 64 * 1024;
+/** m3u8 读取上限：master playlist 通常 < 1KB，媒体列表覆盖长片分片以提取精确总时长 */
+const M3U8_MAX_BYTES = 256 * 1024;
 
 /** 分片前缀：SPS / moov 必然在开头，96KB 足够，不必为几十 MB 的分片买单 */
 const SEGMENT_PREFIX_BYTES = 96 * 1024;
@@ -49,6 +50,19 @@ export const QUALITY_PROBE_TIMEOUT_MS = 12000;
  * 会把「已探到但没探出画质」误报成「探测失败」，所以单独限一笔更短的预算。
  */
 const SEGMENT_BUDGET_MS = 4000;
+
+/** 从点播媒体 m3u8 清单解析总时长（秒）：仅限含 #EXT-X-ENDLIST 的完结清单，剔除广告段 */
+export function parseM3u8Duration(text: string): number | undefined {
+  if (!text || !text.includes('#EXT-X-ENDLIST') || !text.includes('#EXTINF:')) return undefined;
+  const clean = stripAdGroups(text);
+  let total = 0;
+  for (const raw of clean.split('\n')) {
+    const m = raw.trim().match(/^#EXTINF:([\d.]+)/);
+    if (m) total += parseFloat(m[1]) || 0;
+  }
+  const rounded = Math.round(total);
+  return rounded >= 1 && rounded <= 86400 ? rounded : undefined;
+}
 
 /** 从 m3u8 文本解析最高档的短边高度；非 master playlist（无 STREAM-INF）返回 undefined */
 export function parseBestHeight(text: string): number | undefined {
@@ -274,14 +288,20 @@ async function probeSegmentResolution(
   return parseTsVideoResolution(buf)?.height;
 }
 
-/** 取影片的播放地址列表（与 /api/detail 同逻辑：列表接口优先，拿不到再爬详情页） */
-async function fetchEpisodes(source: SourceConfig, id: string, signal: AbortSignal): Promise<string[]> {
+/** 取影片的播放地址列表与 CMS 宣告时长（与 /api/detail 同逻辑：列表接口优先，拿不到再爬详情页） */
+async function fetchEpisodes(
+  source: SourceConfig,
+  id: string,
+  signal: AbortSignal
+): Promise<{ episodes: string[]; cmsDuration?: number }> {
   const api = `${source.url.replace(/\/+$/, '')}?ac=videolist&ids=${encodeURIComponent(id)}`;
   const res = await fetchUpstream(api, { timeoutMs: 6000, headers: cmsRequestHeaders(), signal });
   if (res.ok) {
     try {
       const detail = parseDetail(await res.json(), source);
-      if (detail.episodes.length > 0) return detail.episodes;
+      if (detail.episodes.length > 0) {
+        return { episodes: detail.episodes, cmsDuration: detail.videoInfo.duration };
+      }
     } catch {
       // 列表接口无内容 → 继续尝试详情页
     }
@@ -289,16 +309,16 @@ async function fetchEpisodes(source: SourceConfig, id: string, signal: AbortSign
 
   // detail 缺失时用接口地址的 origin 推导详情页根地址（与 /api/detail 的推导口径一致）
   const detailRoot = (source.detail || originOf(source.url)).replace(/\/+$/, '');
-  if (!/^https?:\/\//.test(detailRoot)) return [];
+  if (!/^https?:\/\//.test(detailRoot)) return { episodes: [] };
   const verdict = await checkUpstreamAllowed(detailRoot);
-  if (!verdict.ok) return [];
+  if (!verdict.ok) return { episodes: [] };
   const detailRes = await fetchUpstream(`${detailRoot}/index.php/vod/detail/id/${id}.html`, {
     timeoutMs: 6000,
     headers: { 'User-Agent': cmsRequestHeaders()['User-Agent'] },
     signal,
   });
-  if (!detailRes.ok) return [];
-  return parseDetailPageHtml(await detailRes.text(), source).episodes;
+  if (!detailRes.ok) return { episodes: [] };
+  return { episodes: parseDetailPageHtml(await detailRes.text(), source).episodes };
 }
 
 /**
@@ -316,13 +336,13 @@ export function probeEpisodeOrder(episodes: string[]): string[] {
   return mid === last ? [mid] : [mid, last];
 }
 
-/** 探测单集地址：m3u8 走清单 → 分片两级，mp4 直链直接读 moov */
+/** 探测单集地址：m3u8 走清单 → 分片两级（顺带累加媒体清单总时长），mp4 直链直接读 moov */
 async function probeEpisode(
   target: string,
   source: SourceConfig,
   merged: AbortSignal,
   signal?: AbortSignal
-): Promise<{ height?: number; error?: string }> {
+): Promise<{ height?: number; duration?: number; error?: string }> {
   // 末尾允许 ?query / #fragment：不少源在 .m3u8 后挂鉴权参数或分片锚点
   const isM3u8 = /\.m3u8([?#]|$)/i.test(target);
 
@@ -344,12 +364,17 @@ async function probeEpisode(
   const height = parseBestHeight(text);
   if (height !== undefined) return { height };
 
+  const duration = parseM3u8Duration(text);
   // 单码率媒体列表：m3u8 里没有档位信息，下沉到分片挖分辨率
-  return { height: await withSegmentBudget(target, text, source, merged, signal) };
+  const segHeight = await withSegmentBudget(target, text, source, merged, signal);
+  return {
+    ...(segHeight !== undefined ? { height: segHeight } : {}),
+    ...(duration !== undefined ? { duration } : {}),
+  };
 }
 
 /**
- * 探测单条「源 + 影片」的画质。
+ * 探测单条「源 + 影片」的画质与时长。
  * 返回的 height 为 undefined 表示「测不出」（单码率 / 直链 / 被拒），而非请求失败——
  * 失败时带 error，前端据此区分「未知」与「探测失败」两种状态。
  */
@@ -370,21 +395,34 @@ export async function probeQuality(item: QualityProbeItem, signal?: AbortSignal)
   const merged = AbortSignal.any(signals);
 
   try {
-    const episodes = await fetchEpisodes(source, id, merged);
+    const { episodes, cmsDuration } = await fetchEpisodes(source, id, merged);
     if (episodes.length === 0) return { ...base, error: '未找到播放资源' };
 
     const startedAt = Date.now();
     let lastError: string | undefined;
+    let bestDuration: number | undefined;
     for (const target of probeEpisodeOrder(episodes)) {
       const r = await probeEpisode(target, source, merged, signal);
-      if (r.height !== undefined) return { ...base, height: r.height };
+      if (r.duration !== undefined && bestDuration === undefined) bestDuration = r.duration;
+      if (r.height !== undefined) {
+        const duration = r.duration ?? bestDuration ?? cmsDuration;
+        return {
+          ...base,
+          height: r.height,
+          ...(duration !== undefined ? { duration } : {}),
+        };
+      }
       if (r.error) lastError = r.error;
       // 源站级拒绝（401/403）换集也不会变，不必再耗一轮超时
       if (lastError && /^HTTP (401|403)$/.test(lastError)) break;
       // 慢源换集重试会把 8s 总死线打穿，反而把「未知」变成「探测失败」：时间过半就不再换集
       if (Date.now() - startedAt > QUALITY_PROBE_TIMEOUT_MS / 2) break;
     }
-    return lastError ? { ...base, error: lastError } : base;
+    const duration = bestDuration ?? cmsDuration;
+    if (lastError) {
+      return { ...base, error: lastError, ...(duration !== undefined ? { duration } : {}) };
+    }
+    return duration !== undefined ? { ...base, duration } : base;
   } catch (err) {
     // 客户端主动中止：不算失败，也不该污染缓存
     if (signal?.aborted) throw err;

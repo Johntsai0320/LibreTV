@@ -20,6 +20,8 @@ export interface SearchResultItem {
   year?: string;
   area?: string;
   remarks?: string;
+  /** 视频时长（秒），来源于 CMS vod_duration */
+  duration?: number;
   /** 自定义源的 API 地址，详情请求需要 */
   sourceUrl?: string;
   isAdult?: boolean;
@@ -35,6 +37,8 @@ export interface VideoInfo {
   director?: string;
   actor?: string;
   remarks?: string;
+  /** 视频时长（秒），来源于 CMS vod_duration */
+  duration?: number;
   sourceKey: string;
   sourceName: string;
   sourceUrl?: string;
@@ -73,6 +77,8 @@ export interface SourceSearchOutcome {
  */
 export interface QualityEntry {
   height?: number;
+  /** 视频时长（秒，来自 m3u8 清单、CMS vod_duration 或播放器实测） */
+  duration?: number;
   from: 'play' | 'probe';
   /**
    * 探测失败原因（如 `HTTP 403`、`请求超时`）。
@@ -95,6 +101,7 @@ export interface QualityProbeResult {
   sourceKey: string;
   vodId: string;
   height?: number;
+  duration?: number;
   error?: string;
 }
 

@@ -55,7 +55,7 @@ function saved() {
 beforeEach(() => {
   vi.useFakeTimers();
   disk.clear();
-  disk.set(KEY, JSON.stringify({ version: 9, state: {
+  disk.set(KEY, JSON.stringify({ version: 10, state: {
     customAPIs: sources,
     selectedKeys: sources.map((source) => source.key),
     sourceHealth: {},
@@ -136,7 +136,7 @@ describe('多标签配置持久化', () => {
 
   it('导入直接覆盖快照后，旧标签普通状态更新不回退导入配置', async () => {
     const a = await openTab();
-    a.storage.setItem(KEY, JSON.stringify({ version: 9, state: {
+    a.storage.setItem(KEY, JSON.stringify({ version: 10, state: {
       customAPIs: [{ key: 'imported', name: '导入源', url: 'https://import.example/api' }],
       selectedKeys: ['imported'],
       adFilter: true,
@@ -185,7 +185,7 @@ describe('多标签配置持久化', () => {
   });
 
   it('旧版配置迁移产生的待写默认值不回退另一标签的新偏好', async () => {
-    disk.set(KEY, JSON.stringify({ ...JSON.parse(disk.get(KEY)!), version: 8 }));
+    disk.set(KEY, JSON.stringify({ ...JSON.parse(disk.get(KEY)!), version: 9 }));
     const a = await openTab();
     const b = await openTab();
     b.store.getState().updateSettings({ autoplayNext: false });
@@ -193,7 +193,7 @@ describe('多标签配置持久化', () => {
     a.flush();
     expect(saved().autoplayNext).toBe(false);
     expect(saved().customAPIs).toEqual(sources);
-    expect(JSON.parse(disk.get(KEY)!).version).toBe(9);
+    expect(JSON.parse(disk.get(KEY)!).version).toBe(10);
   });
 
   it('本标签 flush 同步新基线后，后续普通更新仍保留远端源', async () => {
